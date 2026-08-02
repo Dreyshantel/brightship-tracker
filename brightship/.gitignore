@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+coverage/
+dist/
+
+# NOTE: .env is NOT in here
+# Kofi said he would add it but never did
+# The credentials are fake anyway (they are not)

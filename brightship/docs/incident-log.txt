@@ -1,0 +1,59 @@
+BrightShip Logistics — Incident Log
+====================================
+
+[2024-01-08] OUTAGE — 4 hours
+Production went down at 11pm. Nobody noticed until a customer called at 7am.
+Root cause: disk full on the prod server. Docker logs had been growing for 3 months.
+Fix: deleted logs manually. Added nothing to prevent recurrence.
+- Kofi
+
+[2024-01-19] DATA ISSUE — unknown duration
+A developer ran a test migration script against the wrong database.
+It was supposed to run against his local DB. It ran against prod.
+About 200 shipment records had their status reset to PENDING.
+We restored manually from a backup. The backup was 6 days old.
+Some data was permanently lost.
+Fix: told everyone to be more careful.
+- Kofi
+
+[2024-02-03] OUTAGE — 2 hours
+Deploy failed halfway. The server was in a broken state.
+The new code was running but the old code was still cached somewhere.
+Spent 2 hours figuring out what was happening.
+Had to SSH in and restart everything manually.
+No rollback procedure exists. Created this log entry instead.
+- Kofi
+
+[2024-02-14] SECURITY NOTE
+Someone from the engineering team noticed the .env file is in the GitHub repo.
+It has been there since the first commit in September.
+The Stripe key in there is a real live key.
+We changed the key. We do not know if anyone used it.
+We did not add .env to .gitignore properly.
+- Kofi
+
+[2024-02-28] PERFORMANCE — ongoing
+The /shipments endpoint is slow when there are more than 500 records.
+No indexes on the table.
+No pagination.
+Returns everything every time.
+Nobody has fixed this. It is getting worse.
+- Kofi
+
+[2024-03-11] OUTAGE — 6 hours
+Worst one yet. The RDS instance ran out of storage.
+AWS suspended it automatically.
+We did not have storage alerts configured.
+Emeka had to manually increase storage from the console at 2am.
+The staging server was also affected because it points at the same RDS.
+- Kofi
+
+[2024-03-15] KOFI LEFT
+This is my last day. Good luck everyone.
+The prod server IP is 54.72.xxx.xxx
+The PEM file is on my laptop and in a shared Google Drive folder somewhere
+The AWS root credentials are in the Notion doc
+The database password is brightship2024
+You will need to ask Emeka for the Stripe dashboard access
+The staging server is the same as production for most purposes
+- Kofi
