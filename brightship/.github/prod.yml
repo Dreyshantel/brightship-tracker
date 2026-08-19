@@ -1,0 +1,73 @@
+name: Release → Production
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 18 }
+      - run: cd brightship && npm ci
+      - run: cd brightship && npm run test:unit
+      - name: Build & push
+        run: |
+          cd brightship
+          IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
+          docker build -t $IMAGE:${GITHUB_SHA} .
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+          docker push $IMAGE:${GITHUB_SHA}
+
+  deploy-to-prod:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/brightship
+            IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
+            DEPLOY_IMAGE=${IMAGE} DEPLOY_TAG=${{ github.sha }} ./deploy.sh
+
+      - name: Production smoke test
+        id: smoke
+        continue-on-error: true
+        run: |
+          for i in {1..12}; do
+            if curl -fsS http://prod-host:3000/health; then
+              echo OK && exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Mark successful deploy
+        if: steps.smoke.outcome == 'success'
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/brightship
+            IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
+            echo "${IMAGE}:${{ github.sha }}" > last_good_deploy
+
+      - name: Rollback on failure
+        if: steps.smoke.outcome != 'success'
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/brightship
+            ./rollback.sh || (echo "Rollback failed" && exit 1)

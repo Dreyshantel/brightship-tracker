@@ -1,0 +1,17 @@
+name: Feature — Lint & Unit
+on:
+  push:
+    branches: [ 'feature/**' ]
+  pull_request:
+    branches: [ develop ]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 18 }
+      - run: cd brightship && npm ci
+      - run: cd brightship && npm run lint || true
+      - run: cd brightship && npm run test:unit

@@ -1,0 +1,69 @@
+name: Develop → Staging
+on:
+  push:
+    branches: [ develop ]
+  pull_request:
+    types: [ closed ]
+    branches: [ develop ]
+
+jobs:
+  build-test-push-deploy:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' || (
+        github.event_name == 'pull_request' && github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'feature/')
+      )
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: brightship_test
+        options: >-
+          --health-cmd "pg_isready -U admin -d brightship_test" --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 18 }
+      - name: Install
+        run: cd brightship && npm ci
+      - name: Unit tests
+        run: cd brightship && npm run test:unit
+      - name: Integration tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USER: admin
+          DB_PASSWORD: testpassword
+          DB_NAME: brightship_test
+        run: cd brightship && npm run test:integration
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build & push image to ECR
+        run: |
+          cd brightship
+          IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
+          docker build -t $IMAGE:${GITHUB_SHA} .
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+          docker push $IMAGE:${GITHUB_SHA}
+
+      - name: Trigger staging (Portainer webhook)
+        run: curl -s -X POST "${{ secrets.PORTAINER_STAGING_WEBHOOK }}"
+
+      - name: Staging smoke test
+        run: |
+          for i in {1..12}; do
+            if curl -fsS http://staging-host:3000/health; then
+              echo OK && exit 0
+            fi
+            sleep 5
+          done
+          exit 1
