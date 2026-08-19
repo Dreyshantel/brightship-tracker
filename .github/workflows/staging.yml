@@ -1,0 +1,79 @@
+name: Develop → Staging
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-test-push-deploy:
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event_name == 'push' || (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        startsWith(github.event.pull_request.head.ref, 'feature/')
+      )
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: brightship_test
+        options: >-
+          --health-cmd "pg_isready -U admin -d brightship_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: brightship
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: brightship
+        run: npm run test:unit
+
+      - name: Integration tests
+        working-directory: brightship
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USER: admin
+          DB_PASSWORD: testpassword
+          DB_NAME: brightship_test
+        run: npm run test:integration
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship
+          push: true
+          tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
