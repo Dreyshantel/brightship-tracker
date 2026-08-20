@@ -102,3 +102,61 @@ jobs:
           context: ./brightship
           push: true
           tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+      - name: Deploy staging to Portainer
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
+
+          echo "Reading current Portainer stack..."
+
+          STACK=$(curl --fail-with-body -ks \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/1")
+
+          FILE=$(curl --fail-with-body -ks \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/1/file" \
+            | jq -r '.StackFileContent')
+
+          if [ -z "$FILE" ] || [ "$FILE" = "null" ]; then
+            echo "Failed to retrieve Portainer stack file."
+            exit 1
+          fi
+
+          ENVS=$(echo "$STACK" | jq '.Env')
+
+          echo "Updating IMAGE_TAG..."
+
+          ENVS=$(echo "$ENVS" | jq \
+            --arg image_tag "$IMAGE_TAG" \
+            'map(
+              if .name == "IMAGE_TAG"
+              then .value = $image_tag
+              else .
+              end
+            )')
+
+          PAYLOAD=$(jq -n \
+            --arg file "$FILE" \
+            --argjson env "$ENVS" \
+            '{
+              StackFileContent: $file,
+              Env: $env,
+              Prune: false,
+              RepullImageAndRedeploy: true
+            }')
+
+          echo "Updating Portainer staging stack..."
+
+          curl --fail-with-body -ks \
+            -X PUT \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/1?endpointId=3" \
+            -d "$PAYLOAD"
+
+          echo "Staging deployment completed successfully."
