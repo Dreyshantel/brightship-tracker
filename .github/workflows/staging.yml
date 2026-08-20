@@ -31,6 +31,8 @@ jobs:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: testpassword
           POSTGRES_DB: brightship_test
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U admin -d brightship_test"
           --health-interval 10s
@@ -45,16 +47,39 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: brightship/package-lock.json
 
       - name: Install dependencies
         working-directory: brightship
         run: npm ci
 
-      - name: Unit tests
-        working-directory: brightship
-        run: npm run test:unit
+      - name: Wait for PostgreSQL
+        env:
+          PGPASSWORD: testpassword
+        run: |
+          until pg_isready \
+            -h 127.0.0.1 \
+            -p 5432 \
+            -U admin \
+            -d brightship_test
+          do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
 
-      - name: Integration tests
+      - name: Initialize test database
+        env:
+          PGPASSWORD: testpassword
+        run: |
+          psql \
+            -h 127.0.0.1 \
+            -p 5432 \
+            -U admin \
+            -d brightship_test \
+            -f brightship/database/schema.sql
+
+      - name: Run tests
         working-directory: brightship
         env:
           DB_HOST: 127.0.0.1
@@ -62,7 +87,7 @@ jobs:
           DB_USER: admin
           DB_PASSWORD: testpassword
           DB_NAME: brightship_test
-        run: npm run test:integration
+        run: npm test
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -77,3 +102,69 @@ jobs:
           context: ./brightship
           push: true
           tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+      - name: Deploy staging to Portainer
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
+
+          echo "Reading staging Compose file from repository..."
+
+          FILE=$(cat brightship/compose-staging.yml)
+
+          if [ -z "$FILE" ]; then
+            echo "Staging Compose file is empty."
+            exit 1
+          fi
+
+          echo "Reading current Portainer stack environment..."
+
+          STACK=$(curl --fail-with-body -ks \
+            --connect-timeout 15 \
+            --max-time 30 \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/1")
+
+          ENVS=$(echo "$STACK" | jq '.Env')
+
+          if [ "$ENVS" = "null" ]; then
+            echo "Portainer stack environment could not be read."
+            exit 1
+          fi
+
+          echo "Updating IMAGE_TAG..."
+
+          ENVS=$(echo "$ENVS" | jq \
+            --arg image_tag "$IMAGE_TAG" \
+            'map(
+              if .name == "IMAGE_TAG"
+              then .value = $image_tag
+              else .
+              end
+            )')
+
+          PAYLOAD=$(jq -n \
+            --arg file "$FILE" \
+            --argjson env "$ENVS" \
+            '{
+              StackFileContent: $file,
+              Env: $env,
+              Prune: false,
+              RepullImageAndRedeploy: true
+            }')
+
+          echo "Updating Portainer staging stack..."
+
+          curl --fail-with-body -ks \
+            --connect-timeout 15 \
+            --max-time 60 \
+            -X PUT \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/1?endpointId=3" \
+            -d "$PAYLOAD"
+
+          echo "Staging deployment completed successfully."
