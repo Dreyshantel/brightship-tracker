@@ -111,23 +111,29 @@ jobs:
         run: |
           set -e
 
-          echo "Reading current Portainer stack..."
+          echo "Reading staging Compose file from repository..."
 
-          STACK=$(curl --fail-with-body -ks \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            "${PORTAINER_URL}/api/stacks/1")
+          FILE=$(cat brightship/compose-staging.yml)
 
-          FILE=$(curl --fail-with-body -ks \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            "${PORTAINER_URL}/api/stacks/1/file" \
-            | jq -r '.StackFileContent')
-
-          if [ -z "$FILE" ] || [ "$FILE" = "null" ]; then
-            echo "Failed to retrieve Portainer stack file."
+          if [ -z "$FILE" ]; then
+            echo "Staging Compose file is empty."
             exit 1
           fi
 
+          echo "Reading current Portainer stack environment..."
+
+          STACK=$(curl --fail-with-body -ks \
+            --connect-timeout 15 \
+            --max-time 30 \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/1")
+
           ENVS=$(echo "$STACK" | jq '.Env')
+
+          if [ "$ENVS" = "null" ]; then
+            echo "Portainer stack environment could not be read."
+            exit 1
+          fi
 
           echo "Updating IMAGE_TAG..."
 
@@ -153,6 +159,8 @@ jobs:
           echo "Updating Portainer staging stack..."
 
           curl --fail-with-body -ks \
+            --connect-timeout 15 \
+            --max-time 60 \
             -X PUT \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
