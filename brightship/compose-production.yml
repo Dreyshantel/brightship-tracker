@@ -9,5 +9,6 @@ services:
       DB_NAME: "${DB_NAME}"
       DB_USER: "${DB_USER}"
       DB_PASSWORD: "${DB_PASSWORD}"
+      DB_SSL: "true"
       APP_VERSION: "${IMAGE_TAG}"
     restart: unless-stopped
