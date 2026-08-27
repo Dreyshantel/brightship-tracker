@@ -173,7 +173,7 @@ jobs:
       - name: Configure AWS credentials for staging smoke test
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Production-Deploy
+          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Staging-Deploy
           aws-region: us-east-1
 
       - name: Staging smoke test
