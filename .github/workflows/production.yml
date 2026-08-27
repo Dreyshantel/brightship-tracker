@@ -1,0 +1,96 @@
+name: Production Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Git SHA/image tag to deploy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Production-Deploy
+          aws-region: us-east-1
+
+      - name: Deploy production via SSM
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -e
+
+          COMPOSE_B64=$(base64 -w 0 brightship/compose-production.yml)
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region us-east-1 \
+            --instance-ids i-0fdce62ef49bc9fa4 \
+            --document-name AWS-RunShellScript \
+            --parameters "commands=[
+              \"set -e\",
+              \"cd /home/ssm-user/brightship-production\",
+              \"echo '$COMPOSE_B64' | base64 -d > compose-production.yml\",
+              \"SECRET=\\$(aws secretsmanager get-secret-value --secret-id 'rds!db-97b7c300-82ae-4e9c-ae7d-9f81383cad2d' --region us-east-1 --query SecretString --output text)\",
+              \"export DB_USER=\\$(echo \\\"\\$SECRET\\\" | jq -r .username)\",
+              \"export DB_PASSWORD=\\$(echo \\\"\\$SECRET\\\" | jq -r .password)\",
+              \"export DB_HOST=brightship-production-db.cojkosse0m3v.us-east-1.rds.amazonaws.com\",
+              \"export DB_NAME=postgres\",
+              \"export IMAGE_TAG='$IMAGE_TAG'\",
+              \"docker compose -f compose-production.yml pull\",
+              \"docker compose -f compose-production.yml up -d\",
+              \"unset DB_USER DB_PASSWORD SECRET\",
+              \"echo Production deployment completed\"
+            ]" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "SSM command ID: $COMMAND_ID"
+
+          for i in {1..30}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --region us-east-1 \
+              --command-id "$COMMAND_ID" \
+              --instance-id i-0fdce62ef49bc9fa4 \
+              --query 'Status' \
+              --output text)
+
+            echo "Deployment status: $STATUS"
+
+            case "$STATUS" in
+              Success)
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut)
+                echo "Production deployment failed."
+                exit 1
+                ;;
+            esac
+
+            sleep 5
+          done
+
+          echo "Deployment timed out."
+          exit 1
+
+      - name: Production smoke test
+        run: |
+          curl --fail --silent --show-error \
+            http://44.209.188.71:3000/health
+
+          echo "Production health check passed."
