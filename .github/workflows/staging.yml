@@ -175,6 +175,8 @@ jobs:
           set -e
 
           curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
             http://44.209.188.71:3001/health
 
           echo "Staging smoke test passed."
@@ -254,6 +256,8 @@ jobs:
           set -e
 
           curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
             http://44.209.188.71:3000/health
 
           echo "Production smoke test passed."
