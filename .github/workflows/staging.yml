@@ -170,16 +170,56 @@ jobs:
 
           echo "Staging deployment completed successfully."
 
+      - name: Configure AWS credentials for staging smoke test
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Production-Deploy
+          aws-region: us-east-1
+
       - name: Staging smoke test
         run: |
           set -e
 
-          curl --fail --silent --show-error \
-            --connect-timeout 10 \
-            --max-time 30 \
-            http://44.209.188.71:3001/health
+          COMMAND_ID=$(aws ssm send-command \
+            --region us-east-1 \
+            --instance-ids i-0fdce62ef49bc9fa4 \
+            --document-name AWS-RunShellScript \
+            --parameters 'commands=["curl --fail --silent --show-error --connect-timeout 10 --max-time 30 http://127.0.0.1:3001/health"]' \
+            --query 'Command.CommandId' \
+            --output text)
 
-          echo "Staging smoke test passed."
+          echo "Staging smoke test command ID: $COMMAND_ID"
+
+          for i in {1..12}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --region us-east-1 \
+              --command-id "$COMMAND_ID" \
+              --instance-id i-0fdce62ef49bc9fa4 \
+              --query 'Status' \
+              --output text)
+
+            echo "Staging smoke test status: $STATUS"
+
+            case "$STATUS" in
+              Success)
+                echo "Staging smoke test passed."
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut)
+                echo "Staging smoke test failed."
+                aws ssm get-command-invocation \
+                  --region us-east-1 \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id i-0fdce62ef49bc9fa4
+                exit 1
+                ;;
+            esac
+
+            sleep 5
+          done
+
+          echo "Staging smoke test timed out."
+          exit 1
 
   deploy-production:
     name: Deploy to Production
