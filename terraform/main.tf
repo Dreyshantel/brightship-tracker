@@ -336,6 +336,81 @@ resource "aws_security_group" "default" {
 }
 
 # ============================================================
+# K3S PRODUCTION SECURITY GROUP
+# ============================================================
+
+resource "aws_security_group" "k3s" {
+  name        = "BrightShip-K3s-Production-SG"
+  description = "Security group for the BrightShip K3s production EC2."
+  vpc_id      = aws_vpc.nexus.id
+
+  # HTTP traffic to the application
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTPS traffic to the application
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # K3s API server
+  # Keep this restricted; we will tighten it further if needed.
+  ingress {
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+
+  tags = {
+    Name = "BrightShip-K3s-Production-SG"
+  }
+}
+
+resource "aws_vpc_security_group_egress_rule" "k3s_https" {
+  security_group_id = aws_security_group.k3s.id
+
+  cidr_ipv4   = "0.0.0.0/0"
+  from_port   = 443
+  to_port     = 443
+  ip_protocol = "tcp"
+
+  description = "Allow K3s EC2 to reach AWS services over HTTPS"
+}
+# ============================================================
+# K3S → RDS ACCESS
+# ============================================================
+
+resource "aws_vpc_security_group_egress_rule" "k3s_rds" {
+  security_group_id            = aws_security_group.k3s.id
+  referenced_security_group_id = aws_security_group.rds.id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+
+  description = "Allow K3s production EC2 to connect to BrightShip production RDS"
+}
+
+
+resource "aws_vpc_security_group_ingress_rule" "rds_from_k3s" {
+  security_group_id            = aws_security_group.rds.id
+  referenced_security_group_id = aws_security_group.k3s.id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+
+  description = "Allow PostgreSQL connections from BrightShip K3s production EC2"
+}
+
+# ============================================================
 # ELASTIC IP
 # ============================================================
 
@@ -464,6 +539,39 @@ resource "aws_iam_role_policy" "read_production_rds_secret" {
 }
 
 # ============================================================
+# K3S IAM ROLE
+# ============================================================
+
+resource "aws_iam_role" "k3s" {
+  name        = "BrightShip-K3s-Production-Role"
+  description = "IAM role for the BrightShip K3s production EC2 instance."
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [{
+      Effect = "Allow"
+
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "k3s" {
+  name = "BrightShip-K3s-Production-Profile"
+  role = aws_iam_role.k3s.name
+}
+
+resource "aws_iam_role_policy_attachment" "k3s_ssm" {
+  role       = aws_iam_role.k3s.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# ============================================================
 # EC2
 # ============================================================
 
@@ -481,6 +589,54 @@ resource "aws_instance" "nexus" {
 
   tags = {
     Name = "brightship_staging_Ec2"
+  }
+}
+
+# ============================================================
+# K3S PRODUCTION EC2
+# ============================================================
+
+resource "aws_instance" "k3s" {
+  ami           = var.k3s_ami_id
+  instance_type = var.k3s_instance_type
+
+  subnet_id = aws_subnet.public2.id
+
+  associate_public_ip_address = true
+
+  iam_instance_profile = aws_iam_instance_profile.k3s.name
+
+  vpc_security_group_ids = [
+    aws_security_group.k3s.id
+  ]
+
+  user_data = <<-EOF
+  #!/bin/bash
+  set -eux
+
+  apt-get update
+  apt-get install -y curl
+
+  curl -sfL https://get.k3s.io | sh -
+
+  systemctl enable k3s
+  systemctl start k3s
+
+  until /usr/local/bin/kubectl get nodes >/dev/null 2>&1; do
+    echo "Waiting for k3s to become ready..."
+    sleep 5
+  done
+
+  mkdir -p /home/ubuntu/.kube
+  cp /etc/rancher/k3s/k3s.yaml /home/ubuntu/.kube/config
+  chown -R ubuntu:ubuntu /home/ubuntu/.kube
+  chmod 600 /home/ubuntu/.kube/config
+
+  echo "K3s bootstrap completed successfully"
+EOF
+
+  tags = {
+    Name = var.k3s_name
   }
 }
 
