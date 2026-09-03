@@ -1,11 +1,15 @@
-name: Develop → Staging → Production
+name: Branch Validation → CI → Staging → Production
 
 on:
-  push:
+  pull_request:
     branches:
       - develop
-  pull_request:
-    types: [closed]
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+  push:
     branches:
       - develop
 
@@ -14,60 +18,120 @@ permissions:
   packages: write
   id-token: write
 
+
 jobs:
-  build-test-push-deploy:
+
+  # ============================================================
+  # 1. BRANCH VALIDATION
+  # ============================================================
+
+  branch-validation:
+    name: Branch Validation
     runs-on: ubuntu-latest
 
-    if: >
-      github.event_name == 'push' || (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.merged == true &&
-        startsWith(github.event.pull_request.head.ref, 'feature/')
-      )
+    if: github.event_name == 'pull_request'
+
+    steps:
+
+      - name: Validate squad branch
+        shell: bash
+        run: |
+          BRANCH="${{ github.head_ref }}"
+
+          echo "PR source branch: $BRANCH"
+
+          case "$BRANCH" in
+
+            squad-alpha/*)
+              echo "Valid Squad Alpha branch"
+              ;;
+
+            squad-beta/*)
+              echo "Valid Squad Beta branch"
+              ;;
+
+            squad-gamma/*)
+              echo "Valid Squad Gamma branch"
+              ;;
+
+            squad-delta/*)
+              echo "Valid Squad Delta branch"
+              ;;
+
+            *)
+              echo "ERROR: Invalid squad branch."
+              echo ""
+              echo "Expected:"
+              echo "  squad-alpha/<feature>"
+              echo "  squad-beta/<feature>"
+              echo "  squad-gamma/<feature>"
+              echo "  squad-delta/<feature>"
+              exit 1
+              ;;
+          esac
+
+
+  # ============================================================
+  # 2. CI GATE
+  # ============================================================
+
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+
+    if: github.event_name == 'pull_request'
 
     services:
+
       postgres:
         image: postgres:15-alpine
+
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: testpassword
           POSTGRES_DB: brightship_test
-        ports:
-          - 5432:5432
+
         options: >-
           --health-cmd "pg_isready -U admin -d brightship_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
+      redis:
+        image: redis:7-alpine
+
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+
+      # --------------------------------------------------------
+      # Setup Node
+      # --------------------------------------------------------
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: brightship/package-lock.json
+          node-version: 24
 
-      - name: Install dependencies
-        working-directory: brightship
-        run: npm ci
 
-      - name: Wait for PostgreSQL
-        env:
-          PGPASSWORD: testpassword
-        run: |
-          until pg_isready \
-            -h 127.0.0.1 \
-            -p 5432 \
-            -U admin \
-            -d brightship_test
-          do
-            echo "Waiting for PostgreSQL..."
-            sleep 2
-          done
+      # --------------------------------------------------------
+      # Initialize PostgreSQL
+      # --------------------------------------------------------
 
       - name: Initialize test database
         env:
@@ -78,17 +142,103 @@ jobs:
             -p 5432 \
             -U admin \
             -d brightship_test \
-            -f brightship/database/schema.sql
+            -f database/schema.sql
 
-      - name: Run tests
-        working-directory: brightship
+
+      # ========================================================
+      # API
+      # ========================================================
+
+      - name: Install API dependencies
+        working-directory: services/api
+        run: npm ci
+
+      - name: Run API tests
+        working-directory: services/api
         env:
           DB_HOST: 127.0.0.1
           DB_PORT: 5432
           DB_USER: admin
           DB_PASSWORD: testpassword
           DB_NAME: brightship_test
+          DB_SSL: "false"
+
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+
         run: npm test
+
+
+      # ========================================================
+      # JOBS
+      # ========================================================
+
+      - name: Install Jobs dependencies
+        working-directory: services/jobs
+        run: npm ci
+
+
+      # ========================================================
+      # NOTIFY
+      # ========================================================
+
+      - name: Install Notify dependencies
+        working-directory: services/notify
+        run: npm ci
+
+
+      # ========================================================
+      # SECRET SCANNING
+      # ========================================================
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+
+
+      # ========================================================
+      # NPM AUDIT
+      # ========================================================
+
+      - name: Audit API dependencies
+        working-directory: services/api
+        run: npm audit --audit-level=high
+
+      - name: Audit Jobs dependencies
+        working-directory: services/jobs
+        run: npm audit --audit-level=high
+
+      - name: Audit Notify dependencies
+        working-directory: services/notify
+        run: npm audit --audit-level=high
+
+
+  # ============================================================
+  # 3. BUILD + SCAN + PUSH
+  #
+  # Runs ONLY after develop receives a successful PR merge/push.
+  # ============================================================
+
+  build-scan-push:
+    name: Build, Scan & Push Images
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/develop'
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Login to GHCR
+      # --------------------------------------------------------
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -97,31 +247,153 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+
+      # ========================================================
+      # BUILD API
+      # ========================================================
+
+      - name: Build API image
         uses: docker/build-push-action@v6
         with:
-          context: ./brightship
-          push: true
+          context: ./services/api
+          file: ./services/api/Dockerfile
+          load: true
           tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+
+      # ========================================================
+      # BUILD JOBS
+      # ========================================================
+
+      - name: Build Jobs image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/jobs
+          file: ./services/jobs/Dockerfile
+          load: true
+          tags: ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+
+      # ========================================================
+      # BUILD NOTIFY
+      # ========================================================
+
+      - name: Build Notify image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/notify
+          file: ./services/notify/Dockerfile
+          load: true
+          tags: ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+      # ========================================================
+      # TRIVY
+      # ========================================================
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+        with:
+          version: latest
+
+
+      - name: Scan API image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+
+      - name: Scan Jobs image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+
+      - name: Scan Notify image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+      # ========================================================
+      # PUSH IMAGES
+      # ========================================================
+
+      - name: Push API image
+        run: |
+          docker push \
+            ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+
+      - name: Push Jobs image
+        run: |
+          docker push \
+            ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+
+      - name: Push Notify image
+        run: |
+          docker push \
+            ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+  # ============================================================
+  # 4. DEPLOY TO STAGING
+  # ============================================================
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+
+    needs:
+      - build-scan-push
+
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/develop'
+
+    steps:
+
+      # --------------------------------------------------------
+      # Configure AWS credentials
+      # --------------------------------------------------------
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Staging-Deploy
+          aws-region: us-east-1
+
+
+      # --------------------------------------------------------
+      # Update Portainer staging stack
+      # --------------------------------------------------------
 
       - name: Deploy staging to Portainer
         env:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           IMAGE_TAG: ${{ github.sha }}
+
         run: |
           set -e
 
-          echo "Reading staging Compose file from repository..."
+          echo "Reading staging Compose file..."
 
-          FILE=$(cat brightship/compose-staging.yml)
+          FILE=$(cat compose-staging.yml)
 
           if [ -z "$FILE" ]; then
-            echo "Staging Compose file is empty."
+            echo "ERROR: compose-staging.yml is empty."
             exit 1
           fi
 
-          echo "Reading current Portainer stack environment..."
+          echo "Reading current Portainer stack..."
 
           STACK=$(curl --fail-with-body -ks \
             --connect-timeout 15 \
@@ -132,7 +404,7 @@ jobs:
           ENVS=$(echo "$STACK" | jq '.Env')
 
           if [ "$ENVS" = "null" ]; then
-            echo "Portainer stack environment could not be read."
+            echo "ERROR: Could not read Portainer stack environment."
             exit 1
           fi
 
@@ -168,13 +440,12 @@ jobs:
             "${PORTAINER_URL}/api/stacks/1?endpointId=3" \
             -d "$PAYLOAD"
 
-          echo "Staging deployment completed successfully."
+          echo "Staging deployment triggered."
 
-      - name: Configure AWS credentials for staging smoke test
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Staging-Deploy
-          aws-region: us-east-1
+
+      # --------------------------------------------------------
+      # Staging smoke test
+      # --------------------------------------------------------
 
       - name: Staging smoke test
         run: |
@@ -191,6 +462,7 @@ jobs:
           echo "Staging smoke test command ID: $COMMAND_ID"
 
           for i in {1..12}; do
+
             STATUS=$(aws ssm get-command-invocation \
               --region us-east-1 \
               --command-id "$COMMAND_ID" \
@@ -201,44 +473,72 @@ jobs:
             echo "Staging smoke test status: $STATUS"
 
             case "$STATUS" in
+
               Success)
                 echo "Staging smoke test passed."
                 exit 0
                 ;;
+
               Failed|Cancelled|TimedOut)
                 echo "Staging smoke test failed."
+
                 aws ssm get-command-invocation \
                   --region us-east-1 \
                   --command-id "$COMMAND_ID" \
                   --instance-id i-0fdce62ef49bc9fa4
+
                 exit 1
                 ;;
+
             esac
 
             sleep 5
+
           done
 
           echo "Staging smoke test timed out."
           exit 1
 
+
+  # ============================================================
+  # 5. PRODUCTION
+  #
+  # Production only starts after staging succeeds.
+  # GitHub Environment "production" can require manual approval.
+  # ============================================================
+
   deploy-production:
     name: Deploy to Production
-    needs: build-test-push-deploy
+
+    needs:
+      - deploy-staging
+
     runs-on: ubuntu-latest
 
     environment:
       name: production
 
     steps:
+
+      # --------------------------------------------------------
+      # Configure AWS credentials
+      # --------------------------------------------------------
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::928118644342:role/BrightShip-GitHub-Production-Deploy
           aws-region: us-east-1
 
+
+      # --------------------------------------------------------
+      # Production deployment
+      # --------------------------------------------------------
+
       - name: Deploy production via SSM
         env:
           IMAGE_TAG: ${{ github.sha }}
+
         run: |
           set -e
 
@@ -247,15 +547,21 @@ jobs:
             '[
               "set -e",
               "cd /home/ssm-user/brightship-production",
+
               "SECRET=$(aws secretsmanager get-secret-value --secret-id '\''rds!db-97b7c300-82ae-4e9c-ae7d-9f81383cad2d'\'' --region us-east-1 --query SecretString --output text)",
+
               "export DB_USER=$(echo \"$SECRET\" | jq -r .username)",
               "export DB_PASSWORD=$(echo \"$SECRET\" | jq -r .password)",
               "export DB_HOST=brightship-production-db.cojkosse0m3v.us-east-1.rds.amazonaws.com",
               "export DB_NAME=postgres",
+
               "export IMAGE_TAG='\''" + $image_tag + "'\''",
+
               "docker compose -f compose-production.yml pull",
               "docker compose -f compose-production.yml up -d",
+
               "unset DB_USER DB_PASSWORD SECRET",
+
               "echo Production deployment completed"
             ]')
 
@@ -272,6 +578,7 @@ jobs:
           echo "SSM command ID: $COMMAND_ID"
 
           for i in {1..30}; do
+
             STATUS=$(aws ssm get-command-invocation \
               --region us-east-1 \
               --command-id "$COMMAND_ID" \
@@ -282,11 +589,14 @@ jobs:
             echo "Deployment status: $STATUS"
 
             case "$STATUS" in
+
               Success)
                 echo "Production deployment completed."
                 exit 0
                 ;;
+
               Failed|Cancelled|TimedOut)
+
                 echo "Production deployment failed."
 
                 aws ssm get-command-invocation \
@@ -296,13 +606,20 @@ jobs:
 
                 exit 1
                 ;;
+
             esac
 
             sleep 5
+
           done
 
           echo "Production deployment timed out."
           exit 1
+
+
+      # --------------------------------------------------------
+      # Production smoke test
+      # --------------------------------------------------------
 
       - name: Production smoke test
         run: |
@@ -319,6 +636,7 @@ jobs:
           echo "Production smoke test command ID: $COMMAND_ID"
 
           for i in {1..12}; do
+
             STATUS=$(aws ssm get-command-invocation \
               --region us-east-1 \
               --command-id "$COMMAND_ID" \
@@ -329,11 +647,14 @@ jobs:
             echo "Production smoke test status: $STATUS"
 
             case "$STATUS" in
+
               Success)
                 echo "Production smoke test passed."
                 exit 0
                 ;;
+
               Failed|Cancelled|TimedOut)
+
                 echo "Production smoke test failed."
 
                 aws ssm get-command-invocation \
@@ -343,9 +664,11 @@ jobs:
 
                 exit 1
                 ;;
+
             esac
 
             sleep 5
+
           done
 
           echo "Production smoke test timed out."
