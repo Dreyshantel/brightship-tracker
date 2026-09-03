@@ -4,5 +4,7 @@ node_modules/
 coverage/
 dist/
 .env
+.env.test
 
 
+.env.test

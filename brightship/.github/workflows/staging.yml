@@ -1,0 +1,388 @@
+name: Branch Validation → Staging
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+
+  # ============================================================
+  # 1. BRANCH VALIDATION
+  # ============================================================
+  branch-validation:
+    name: Branch Validation
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'pull_request'
+
+    steps:
+
+      - name: Detect squad branch
+        shell: bash
+        run: |
+          BRANCH="${{ github.head_ref }}"
+
+          echo "PR source branch: $BRANCH"
+
+          case "$BRANCH" in
+
+            squad-alpha/*)
+              echo "Valid Squad Alpha branch"
+              ;;
+
+            squad-beta/*)
+              echo "Valid Squad Beta branch"
+              ;;
+
+            squad-gamma/*)
+              echo "Valid Squad Gamma branch"
+              ;;
+
+            squad-delta/*)
+              echo "Valid Squad Delta branch"
+              ;;
+
+            *)
+              echo "ERROR: Invalid squad branch."
+              echo ""
+              echo "Expected:"
+              echo "  squad-alpha/<feature>"
+              echo "  squad-beta/<feature>"
+              echo "  squad-gamma/<feature>"
+              echo "  squad-delta/<feature>"
+              exit 1
+              ;;
+          esac
+
+
+  # ============================================================
+  # 2. CI GATE
+  # ============================================================
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+
+    if: github.event_name == 'pull_request'
+
+    services:
+
+      postgres:
+        image: postgres:15-alpine
+
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: brightship_test
+
+        options: >-
+          --health-cmd "pg_isready -U admin -d brightship_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Initialize test database
+      # --------------------------------------------------------
+      - name: Initialize test database
+        env:
+          PGPASSWORD: testpassword
+        run: |
+          psql \
+            -h 127.0.0.1 \
+            -p 5432 \
+            -U admin \
+            -d brightship_test \
+            -f database/schema.sql
+
+
+      # --------------------------------------------------------
+      # Node.js
+      # --------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+
+      # ========================================================
+      # API
+      # ========================================================
+
+      - name: Install API dependencies
+        working-directory: services/api
+        run: npm ci
+
+      - name: Run API tests
+        working-directory: services/api
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USER: admin
+          DB_PASSWORD: testpassword
+          DB_NAME: brightship_test
+          DB_SSL: 'false'
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+        run: npm test
+
+
+      # ========================================================
+      # JOBS
+      # ========================================================
+
+      - name: Install Jobs dependencies
+        working-directory: services/jobs
+        run: npm ci
+
+
+      # ========================================================
+      # NOTIFY
+      # ========================================================
+
+      - name: Install Notify dependencies
+        working-directory: services/notify
+        run: npm ci
+
+
+      # ========================================================
+      # GITLEAKS
+      # ========================================================
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+
+
+      # ========================================================
+      # NPM AUDIT
+      # ========================================================
+
+      - name: Audit API dependencies
+        working-directory: services/api
+        run: npm audit --audit-level=high
+
+      - name: Audit Jobs dependencies
+        working-directory: services/jobs
+        run: npm audit --audit-level=high
+
+      - name: Audit Notify dependencies
+        working-directory: services/notify
+        run: npm audit --audit-level=high
+
+
+  # ============================================================
+  # 3. BUILD + SCAN + PUSH
+  # ============================================================
+  build-scan-push:
+    name: Build, Scan & Push Images
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Login to GHCR
+      # --------------------------------------------------------
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ========================================================
+      # BUILD API
+      # ========================================================
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/api
+          file: ./services/api/Dockerfile
+          load: true
+          tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+
+      # ========================================================
+      # BUILD JOBS
+      # ========================================================
+
+      - name: Build Jobs image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/jobs
+          file: ./services/jobs/Dockerfile
+          load: true
+          tags: ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+
+      # ========================================================
+      # BUILD NOTIFY
+      # ========================================================
+
+      - name: Build Notify image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/notify
+          file: ./services/notify/Dockerfile
+          load: true
+          tags: ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+      # ========================================================
+      # TRIVY
+      # ========================================================
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+        with:
+          version: latest
+
+
+      # --------------------------------------------------------
+      # Scan API
+      # --------------------------------------------------------
+      - name: Scan API image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+
+      # --------------------------------------------------------
+      # Scan Jobs
+      # --------------------------------------------------------
+      - name: Scan Jobs image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+
+      # --------------------------------------------------------
+      # Scan Notify
+      # --------------------------------------------------------
+      - name: Scan Notify
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+      # ========================================================
+      # PUSH EXISTING BUILT IMAGES
+      # ========================================================
+
+      - name: Push API image
+        run: |
+          docker push ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+
+      - name: Push Jobs image
+        run: |
+          docker push ghcr.io/dreyshantel/brightship-jobs:${{ github.sha }}
+
+      - name: Push Notify image
+        run: |
+          docker push ghcr.io/dreyshantel/brightship-notify:${{ github.sha }}
+
+
+  # ============================================================
+  # 4. DEPLOY TO STAGING
+  # ============================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+
+    needs:
+      - build-scan-push
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+
+    steps:
+
+      # --------------------------------------------------------
+      # Trigger Portainer deployment
+      # --------------------------------------------------------
+      - name: Trigger Portainer deployment
+        run: |
+          curl --fail --show-error --silent \
+            -X POST \
+            "${{ secrets.PORTAINER_WEBHOOK }}"
+
+
+      # --------------------------------------------------------
+      # Wait for deployment
+      # --------------------------------------------------------
+      - name: Wait for staging deployment
+        run: |
+          echo "Waiting for Portainer to deploy the new images..."
+          sleep 20
+
+
+      # --------------------------------------------------------
+      # Verify staging health
+      # --------------------------------------------------------
+      - name: Verify staging health
+        run: |
+          for i in {1..12}; do
+            echo "Health check attempt $i/12..."
+
+            if curl --fail --silent --show-error \
+              http://YOUR-STAGING-HOST:3001/health; then
+
+              echo ""
+              echo "Staging deployment is healthy."
+              exit 0
+            fi
+
+            echo "Staging is not healthy yet."
+            sleep 10
+          done
+
+          echo "ERROR: Staging deployment failed health check."
+          exit 1

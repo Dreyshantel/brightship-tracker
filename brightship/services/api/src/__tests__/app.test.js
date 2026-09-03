@@ -1,10 +1,16 @@
-const request = require('supertest');
-const app     = require('../app');
+require('dotenv').config({ path: '../../../../.env.test' });
 
-// NOTE from Kofi: these tests need postgres running locally first
-// run: docker-compose up db
-// then: npm test
-// they will fail in CI because there's no database there — sorry about that
+const request = require('supertest');
+const { app, redisClient } = require('../app');
+
+beforeAll(async () => {
+  await redisClient.connect();
+});
+
+afterAll(async () => {
+  await redisClient.quit();
+});
+
 
 describe('GET /health', () => {
   it('returns ok', async () => {
