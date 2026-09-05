@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/worker.js",
-    "dev": "nodemon src/worker.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest --forceExit --testEnvironment node"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +14,11 @@
   "dependencies": {
     "bullmq": "^6.3.4",
     "dotenv": "^17.4.2",
-    "ioredis": "^6.0.0"
+    "express": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "redis": "^6.2.1"
+  },
+  "devDependencies": {
+    "jest": "^30.5.1"
   }
 }
