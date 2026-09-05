@@ -36,7 +36,6 @@ jobs:
           PR_MERGED: ${{ github.event.pull_request.merged }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-
           echo "Pull Request merged: $PR_MERGED"
           echo "Source branch: $PR_HEAD_REF"
           echo "Target branch: ${{ github.event.pull_request.base.ref }}"
@@ -133,9 +132,10 @@ jobs:
     steps:
 
       - name: Checkout merged code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -147,11 +147,17 @@ jobs:
             brightship/services/jobs/package-lock.json
             brightship/services/notify/package-lock.json
 
+      # --------------------------------------------------------
+      # Secret scanning
+      # --------------------------------------------------------
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # --------------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------------
       - name: Install API dependencies
         working-directory: brightship/services/api
         run: npm ci
@@ -164,6 +170,9 @@ jobs:
         working-directory: brightship/services/notify
         run: npm ci
 
+      # --------------------------------------------------------
+      # Application tests
+      # --------------------------------------------------------
       - name: Run API tests
         working-directory: brightship/services/api
         run: npm test
@@ -176,6 +185,9 @@ jobs:
         working-directory: brightship/services/notify
         run: npm test
 
+      # --------------------------------------------------------
+      # Dependency security
+      # --------------------------------------------------------
       - name: Run npm audit - API
         working-directory: brightship/services/api
         run: npm audit --audit-level=high
@@ -190,7 +202,7 @@ jobs:
 
 
   # ============================================================
-  # 3. DOCKER BUILD + TRIVY
+  # 3. DOCKER BUILD + TRIVY SECURITY SCAN
   # ============================================================
   docker-security:
     name: Docker Build & Trivy
@@ -204,14 +216,18 @@ jobs:
 
     steps:
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout merged code
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # --------------------------------------------------------
+      # API
+      # --------------------------------------------------------
       - name: Build API image
         uses: docker/build-push-action@v6
         with:
@@ -230,6 +246,9 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
+      # --------------------------------------------------------
+      # JOBS
+      # --------------------------------------------------------
       - name: Build Jobs image
         uses: docker/build-push-action@v6
         with:
@@ -248,6 +267,9 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
+      # --------------------------------------------------------
+      # NOTIFY
+      # --------------------------------------------------------
       - name: Build Notify image
         uses: docker/build-push-action@v6
         with:
@@ -283,10 +305,11 @@ jobs:
 
     steps:
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout merged code
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -298,6 +321,9 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # --------------------------------------------------------
+      # API
+      # --------------------------------------------------------
       - name: Build and push API
         uses: docker/build-push-action@v6
         with:
@@ -308,6 +334,9 @@ jobs:
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}
 
+      # --------------------------------------------------------
+      # JOBS
+      # --------------------------------------------------------
       - name: Build and push Jobs
         uses: docker/build-push-action@v6
         with:
@@ -318,6 +347,9 @@ jobs:
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}
 
+      # --------------------------------------------------------
+      # NOTIFY
+      # --------------------------------------------------------
       - name: Build and push Notify
         uses: docker/build-push-action@v6
         with:
@@ -346,13 +378,12 @@ jobs:
 
     steps:
 
-      # ----------------------------------------------------------
-      # Select stack and compose file
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # Select correct stack and Compose file
+      # --------------------------------------------------------
       - name: Select Portainer stack
         id: stack
         shell: bash
-
         env:
           SQUAD: ${{ needs.branch-validation.outputs.squad }}
 
@@ -395,9 +426,9 @@ jobs:
           echo "compose_file=$COMPOSE_FILE" >> "$GITHUB_OUTPUT"
 
 
-      # ----------------------------------------------------------
-      # Discover Portainer endpoint automatically
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # Discover Portainer endpoint
+      # --------------------------------------------------------
       - name: Discover Portainer endpoint
         id: endpoint
         shell: bash
@@ -410,7 +441,8 @@ jobs:
 
           echo "Discovering Portainer Docker endpoint..."
 
-          RESPONSE=$(curl --fail-with-body \
+          RESPONSE=$(curl \
+            --fail-with-body \
             --silent \
             --show-error \
             -X GET \
@@ -432,9 +464,9 @@ jobs:
           echo "endpoint_id=$ENDPOINT_ID" >> "$GITHUB_OUTPUT"
 
 
-      # ----------------------------------------------------------
-      # Check whether stack already exists
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # Check if stack already exists
+      # --------------------------------------------------------
       - name: Check Portainer stack
         id: existing-stack
         shell: bash
@@ -478,15 +510,17 @@ jobs:
           else
 
             echo "::error::Unexpected response from Portainer."
+
             cat stack-response.json
+
             exit 1
 
           fi
 
 
-      # ----------------------------------------------------------
-      # Create stack if it does not exist
-      # ----------------------------------------------------------
+      # ========================================================
+      # CREATE STACK
+      # ========================================================
       - name: Create Portainer stack
         if: steps.existing-stack.outputs.exists == 'false'
         shell: bash
@@ -500,12 +534,15 @@ jobs:
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
           COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
 
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
         run: |
 
           echo "Creating Portainer stack: $STACK_NAME"
           echo "Compose file: $COMPOSE_FILE"
 
-          curl --fail-with-body \
+          curl \
+            --fail-with-body \
             --silent \
             --show-error \
             -X POST \
@@ -518,16 +555,22 @@ jobs:
             "RepositoryURL": "https://github.com/Dreyshantel/brightship-tracker.git",
             "RepositoryReferenceName": "refs/heads/develop",
             "ComposeFile": "${COMPOSE_FILE}",
-            "RepositoryAuthentication": false
+            "RepositoryAuthentication": false,
+            "Env": [
+              {
+                "name": "DB_PASSWORD",
+                "value": "${DB_PASSWORD}"
+              }
+            ]
           }
           EOF
 
-          echo "Portainer stack created successfully."
+          echo "Portainer stack creation request completed."
 
 
-      # ----------------------------------------------------------
-      # Get newly created stack ID
-      # ----------------------------------------------------------
+      # ========================================================
+      # GET CREATED STACK ID
+      # ========================================================
       - name: Get created stack ID
         if: steps.existing-stack.outputs.exists == 'false'
         id: created-stack
@@ -559,7 +602,9 @@ jobs:
               if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
 
                 echo "Stack ID: $STACK_ID"
+
                 echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
+
                 exit 0
 
               fi
@@ -567,18 +612,21 @@ jobs:
             fi
 
             echo "Waiting for Portainer stack..."
+
             sleep 3
 
           done
 
           echo "::error::Unable to retrieve created stack ID."
+
           cat stack-response.json
+
           exit 1
 
 
-      # ----------------------------------------------------------
-      # Redeploy existing stack
-      # ----------------------------------------------------------
+      # ========================================================
+      # REDEPLOY EXISTING STACK
+      # ========================================================
       - name: Redeploy existing Portainer stack
         if: steps.existing-stack.outputs.exists == 'true'
         shell: bash
@@ -596,7 +644,8 @@ jobs:
           echo "Redeploying existing Portainer stack."
           echo "Stack ID: $STACK_ID"
 
-          curl --fail-with-body \
+          curl \
+            --fail-with-body \
             --silent \
             --show-error \
             -X PUT \
@@ -611,9 +660,9 @@ jobs:
           echo "Portainer stack redeployed successfully."
 
 
-      # ----------------------------------------------------------
-      # Deployment summary
-      # ----------------------------------------------------------
+      # ========================================================
+      # DEPLOYMENT SUMMARY
+      # ========================================================
       - name: Deployment summary
         env:
           SQUAD: ${{ needs.branch-validation.outputs.squad }}
