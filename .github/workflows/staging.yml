@@ -175,6 +175,20 @@ jobs:
         run: npm ci
 
       # --------------------------------------------------------
+      # Initialize test database
+      # --------------------------------------------------------
+      - name: Initialize test database
+        env:
+          PGPASSWORD: ${{ env.DB_PASSWORD }}
+        run: |
+          psql \
+            -h "$DB_HOST" \
+            -p "$DB_PORT" \
+            -U "$DB_USER" \
+            -d "$DB_NAME" \
+            -f brightship/database/schema.sql
+
+      # --------------------------------------------------------
       # Application tests
       # --------------------------------------------------------
       - name: Run API tests
