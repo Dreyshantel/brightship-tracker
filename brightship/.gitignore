@@ -3,7 +3,8 @@ node_modules/
 .DS_Store
 coverage/
 dist/
+.env
+.env.test
 
-# NOTE: .env is NOT in here
-# Kofi said he would add it but never did
-# The credentials are fake anyway (they are not)
+
+.env.test

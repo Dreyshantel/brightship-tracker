@@ -1,36 +1,69 @@
-version: "3.8"
-
-# This runs on both the prod server and the staging server
-# They both use the same DB_HOST so be careful what you do in staging
-# it will affect prod data — I know this is bad but we never fixed it
-# - Kofi
-
 services:
-  app:
-    build: .
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
     environment:
-      DB_HOST:      ${DB_HOST:-localhost}
-      DB_PORT:      5432
-      DB_NAME:      brightship
-      DB_USER:      admin
-      DB_PASSWORD:  brightship2024
-      STRIPE_KEY:   sk_live_51abc123_this_is_a_real_key_do_not_share
-      APP_VERSION:  1.0.0
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-brightship}
+      DB_USER: ${DB_USER:-admin}
+      DB_PASSWORD: ${DB_PASSWORD}
+
+      DB_SSL: ${DB_SSL:-false}
+
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      PORT: ${PORT:-3000}
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  jobs:
+    build:
+      context: ./services/jobs
+      dockerfile: Dockerfile
+    environment:
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  notify:
+    build:
+      context: ./services/notify
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    environment:
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    depends_on:
+      - redis
     restart: unless-stopped
 
   db:
     image: postgres:15-alpine
     environment:
-      POSTGRES_DB:       brightship
-      POSTGRES_USER:     admin
-      POSTGRES_PASSWORD: brightship2024
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${DB_NAME:-brightship}
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
 
 volumes:
   pgdata:
