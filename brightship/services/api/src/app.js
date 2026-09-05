@@ -4,7 +4,6 @@ const { createClient } = require('redis');
 const { Queue } = require('bullmq');
 
 const app = express();
-
 app.use(express.json());
 
 // ─── DATABASE ─────────────────────────────────────────────────────────────────
@@ -77,6 +76,7 @@ app.get('/health', async (req, res) => {
     version: process.env.APP_VERSION || '1.0.0',
   });
 });
+
 
 // ─── LIST SHIPMENTS ───────────────────────────────────────────────────────────
 
