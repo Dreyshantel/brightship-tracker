@@ -452,26 +452,20 @@ jobs:
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
         run: |
-          HTTP_STATUS=$(curl \
-            --silent \
-            --output stack-response.json \
-            --write-out "%{http_code}" \
-            "${PORTAINER_URL}/api/stacks/name/${STACK_NAME}" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}")
+          STACK_ID=$(curl -sf \
+            "${PORTAINER_URL}/api/stacks" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" |
+            jq -r --arg STACK_NAME "$STACK_NAME" \
+            '.[] | select(.Name == $STACK_NAME) | .Id' |
+            head -n 1)
 
-          if [[ "$HTTP_STATUS" == "200" ]]; then
-            STACK_ID=$(jq -r '.Id' stack-response.json)
-
+          if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
-
-          elif [[ "$HTTP_STATUS" == "404" ]]; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-
+            echo "Stack exists: $STACK_NAME (ID: $STACK_ID)"
           else
-            echo "::error::Unexpected response from Portainer: $HTTP_STATUS"
-            cat stack-response.json
-            exit 1
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Stack does not exist: $STACK_NAME"
           fi
 
       - name: Create Portainer stack
