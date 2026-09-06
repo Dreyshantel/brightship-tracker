@@ -396,174 +396,95 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # Select correct stack and Compose file
-      # --------------------------------------------------------
       - name: Select Portainer stack
         id: stack
-        shell: bash
         env:
           SQUAD: ${{ needs.branch-validation.outputs.squad }}
-
         run: |
-
           case "$SQUAD" in
-
             alpha)
               STACK_NAME="brightship-alpha"
               COMPOSE_FILE="brightship/staging/alpha/docker-compose.yml"
               ;;
-
             beta)
               STACK_NAME="brightship-beta"
               COMPOSE_FILE="brightship/staging/beta/docker-compose.yml"
               ;;
-
             gamma)
               STACK_NAME="brightship-gamma"
               COMPOSE_FILE="brightship/staging/gamma/docker-compose.yml"
               ;;
-
             delta)
               STACK_NAME="brightship-delta"
               COMPOSE_FILE="brightship/staging/delta/docker-compose.yml"
               ;;
-
             *)
               echo "::error::Unknown squad: $SQUAD"
               exit 1
               ;;
-
           esac
-
-          echo "Squad: $SQUAD"
-          echo "Stack: $STACK_NAME"
-          echo "Compose file: $COMPOSE_FILE"
 
           echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
           echo "compose_file=$COMPOSE_FILE" >> "$GITHUB_OUTPUT"
 
-
-      # --------------------------------------------------------
-      # Discover Portainer endpoint
-      # --------------------------------------------------------
-      - name: Discover Portainer endpoint
+      - name: Get Portainer endpoint
         id: endpoint
-        shell: bash
-
         env:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-
         run: |
-
-          echo "Discovering Portainer Docker endpoint..."
-
-          RESPONSE=$(curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            -X GET \
+          ENDPOINT_ID=$(curl -sf \
             "${PORTAINER_URL}/api/endpoints" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}")
-
-          echo "Portainer endpoint query successful."
-
-          ENDPOINT_ID=$(echo "$RESPONSE" | jq -r '.[0].Id')
+            -H "X-API-Key: ${PORTAINER_API_KEY}" |
+            jq -r '.[0].Id')
 
           if [[ -z "$ENDPOINT_ID" || "$ENDPOINT_ID" == "null" ]]; then
             echo "::error::Could not determine Portainer endpoint ID."
-            echo "$RESPONSE"
             exit 1
           fi
 
-          echo "Using Portainer endpoint ID: $ENDPOINT_ID"
-
           echo "endpoint_id=$ENDPOINT_ID" >> "$GITHUB_OUTPUT"
 
-
-      # --------------------------------------------------------
-      # Check if stack already exists
-      # --------------------------------------------------------
       - name: Check Portainer stack
         id: existing-stack
-        shell: bash
-
         env:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
-
         run: |
-
-          echo "Checking for existing stack: $STACK_NAME"
-
           HTTP_STATUS=$(curl \
             --silent \
             --output stack-response.json \
             --write-out "%{http_code}" \
-            -X GET \
             "${PORTAINER_URL}/api/stacks/name/${STACK_NAME}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}")
 
-          echo "Portainer response status: $HTTP_STATUS"
-
           if [[ "$HTTP_STATUS" == "200" ]]; then
-
             STACK_ID=$(jq -r '.Id' stack-response.json)
-
-            echo "Stack already exists."
-            echo "Stack ID: $STACK_ID"
 
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
 
           elif [[ "$HTTP_STATUS" == "404" ]]; then
-
-            echo "Stack does not exist."
-            echo "A new stack will be created."
-
             echo "exists=false" >> "$GITHUB_OUTPUT"
 
           else
-
-            echo "::error::Unexpected response from Portainer."
-
+            echo "::error::Unexpected response from Portainer: $HTTP_STATUS"
             cat stack-response.json
-
             exit 1
-
           fi
 
-
-      # ========================================================
-      # CREATE STACK
-      # ========================================================
       - name: Create Portainer stack
         if: steps.existing-stack.outputs.exists == 'false'
-        shell: bash
-
         env:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
-
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
           COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
-
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-
         run: |
-
-          echo "Creating Portainer stack: $STACK_NAME"
-          echo "Compose file: $COMPOSE_FILE"
-
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            -X POST \
+          curl -sf -X POST \
             "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
@@ -583,90 +504,15 @@ jobs:
           }
           EOF
 
-          echo "Portainer stack creation request completed."
-
-
-      # ========================================================
-      # GET CREATED STACK ID
-      # ========================================================
-      - name: Get created stack ID
-        if: steps.existing-stack.outputs.exists == 'false'
-        id: created-stack
-        shell: bash
-
-        env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          STACK_NAME: ${{ steps.stack.outputs.stack_name }}
-
-        run: |
-
-          echo "Retrieving newly created stack..."
-
-          for i in {1..10}; do
-
-            HTTP_STATUS=$(curl \
-              --silent \
-              --output stack-response.json \
-              --write-out "%{http_code}" \
-              -X GET \
-              "${PORTAINER_URL}/api/stacks/name/${STACK_NAME}" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}")
-
-            if [[ "$HTTP_STATUS" == "200" ]]; then
-
-              STACK_ID=$(jq -r '.Id' stack-response.json)
-
-              if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
-
-                echo "Stack ID: $STACK_ID"
-
-                echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
-
-                exit 0
-
-              fi
-
-            fi
-
-            echo "Waiting for Portainer stack..."
-
-            sleep 3
-
-          done
-
-          echo "::error::Unable to retrieve created stack ID."
-
-          cat stack-response.json
-
-          exit 1
-
-
-      # ========================================================
-      # REDEPLOY EXISTING STACK
-      # ========================================================
-      - name: Redeploy existing Portainer stack
+      - name: Redeploy Portainer stack
         if: steps.existing-stack.outputs.exists == 'true'
-        shell: bash
-
         env:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
-
           STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
-
         run: |
-
-          echo "Redeploying existing Portainer stack."
-          echo "Stack ID: $STACK_ID"
-
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            -X PUT \
+          curl -sf -X PUT \
             "${PORTAINER_URL}/api/stacks/${STACK_ID}/git/redeploy?endpointId=${ENDPOINT_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
@@ -675,26 +521,9 @@ jobs:
               "Prune": false
             }'
 
-          echo "Portainer stack redeployed successfully."
-
-
-      # ========================================================
-      # DEPLOYMENT SUMMARY
-      # ========================================================
       - name: Deployment summary
-        env:
-          SQUAD: ${{ needs.branch-validation.outputs.squad }}
-          STACK: ${{ needs.branch-validation.outputs.stack }}
-
         run: |
-
-          echo "=========================================="
-          echo "BrightShip Staging Deployment Successful"
-          echo "=========================================="
-
-          echo "Squad: $SQUAD"
-          echo "Stack: $STACK"
-          echo "Environment: Staging"
-          echo "Images: GHCR"
-          echo "Deployment: Portainer API"
+          echo "Staging deployment successful"
+          echo "Squad: ${{ needs.branch-validation.outputs.squad }}"
+          echo "Stack: ${{ steps.stack.outputs.stack_name }}"
           echo "Commit: ${{ github.event.pull_request.merge_commit_sha }}"
