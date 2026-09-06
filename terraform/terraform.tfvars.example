@@ -1,0 +1,18 @@
+aws_region     = "us-east-1"
+aws_account_id = "YOUR_AWS_ACCOUNT_ID"
+
+environment = "production"
+
+vpc_cidr = "10.0.0.0/16"
+vpc_name = "Nexus_VPC"
+
+main_route_table_id = "YOUR_MAIN_ROUTE_TABLE_ID"
+
+ec2_instance_id   = "YOUR_EC2_INSTANCE_ID"
+ec2_ami_id        = "YOUR_AMI_ID"
+ec2_instance_type = "t3.micro"
+ec2_key_name      = "Nexus_keypair"
+ec2_name          = "Nexus"
+
+rds_identifier        = "brightship-production-db"
+rds_subnet_group_name = "rds-ec2-db-subnet-group-1"

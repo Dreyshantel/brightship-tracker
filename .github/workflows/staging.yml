@@ -1,11 +1,9 @@
-name: Develop → Staging
+name: BrightShip Staging Deployment
 
 on:
-  push:
-    branches:
-      - develop
   pull_request:
-    types: [closed]
+    types:
+      - closed
     branches:
       - develop
 
@@ -13,56 +11,323 @@ permissions:
   contents: read
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: dreyshantel
+
 jobs:
-  build-test-push-deploy:
+
+  # ============================================================
+  # 1. DETERMINE SQUAD
+  # ============================================================
+  branch-validation:
+    name: Determine Squad
     runs-on: ubuntu-latest
 
-    if: >
-      github.event_name == 'push' || (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.merged == true &&
-        startsWith(github.event.pull_request.head.ref, 'feature/')
-      )
+    outputs:
+      squad: ${{ steps.detect-squad.outputs.squad }}
+      stack: ${{ steps.detect-squad.outputs.stack }}
+
+    steps:
+      - name: Determine target squad
+        id: detect-squad
+        shell: bash
+        env:
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "Pull Request merged: $PR_MERGED"
+          echo "Source branch: $PR_HEAD_REF"
+          echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+
+          if [[ "$PR_MERGED" != "true" ]]; then
+            echo "Pull request was closed without being merged."
+            echo "No deployment will occur."
+            exit 0
+          fi
+
+          if [[ "$PR_HEAD_REF" == squad-alpha/* ]]; then
+            SQUAD="alpha"
+            STACK="brightship-alpha"
+
+          elif [[ "$PR_HEAD_REF" == squad-beta/* ]]; then
+            SQUAD="beta"
+            STACK="brightship-beta"
+
+          elif [[ "$PR_HEAD_REF" == squad-gamma/* ]]; then
+            SQUAD="gamma"
+            STACK="brightship-gamma"
+
+          elif [[ "$PR_HEAD_REF" == squad-delta/* ]]; then
+            SQUAD="delta"
+            STACK="brightship-delta"
+
+          else
+            echo "::error::Merged PR must originate from a valid squad branch."
+            echo "::error::Expected:"
+            echo "::error::squad-alpha/*"
+            echo "::error::squad-beta/*"
+            echo "::error::squad-gamma/*"
+            echo "::error::squad-delta/*"
+            exit 1
+          fi
+
+          echo "Detected squad: $SQUAD"
+          echo "Target Portainer stack: $STACK"
+
+          echo "squad=$SQUAD" >> "$GITHUB_OUTPUT"
+          echo "stack=$STACK" >> "$GITHUB_OUTPUT"
+
+
+  # ============================================================
+  # 2. CI GATE
+  # ============================================================
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+
+    if: github.event.pull_request.merged == true
 
     services:
+
       postgres:
         image: postgres:15-alpine
+        ports:
+          - 5432:5432
+
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: testpassword
           POSTGRES_DB: brightship_test
+
         options: >-
           --health-cmd "pg_isready -U admin -d brightship_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
 
-      - name: Setup Node
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: brightship_test
+      DB_USER: admin
+      DB_PASSWORD: testpassword
+      DB_SSL: false
+
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+
+    steps:
+
+      - name: Checkout merged code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            brightship/services/api/package-lock.json
+            brightship/services/jobs/package-lock.json
+            brightship/services/notify/package-lock.json
 
-      - name: Install dependencies
-        working-directory: brightship
+      # --------------------------------------------------------
+      # Secret scanning
+      # --------------------------------------------------------
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --------------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------------
+      - name: Install API dependencies
+        working-directory: brightship/services/api
         run: npm ci
 
-      - name: Unit tests
-        working-directory: brightship
-        run: npm run test:unit
+      - name: Install Jobs dependencies
+        working-directory: brightship/services/jobs
+        run: npm ci
 
-      - name: Integration tests
-        working-directory: brightship
+      - name: Install Notify dependencies
+        working-directory: brightship/services/notify
+        run: npm ci
+
+      # --------------------------------------------------------
+      # Initialize test database
+      # --------------------------------------------------------
+      - name: Initialize test database
         env:
-          DB_HOST: 127.0.0.1
-          DB_PORT: 5432
-          DB_USER: admin
-          DB_PASSWORD: testpassword
-          DB_NAME: brightship_test
-        run: npm run test:integration
+          PGPASSWORD: ${{ env.DB_PASSWORD }}
+        run: |
+          psql \
+            -h "$DB_HOST" \
+            -p "$DB_PORT" \
+            -U "$DB_USER" \
+            -d "$DB_NAME" \
+            -f brightship/database/schema.sql
+
+      # --------------------------------------------------------
+      # Application tests
+      # --------------------------------------------------------
+      - name: Run API tests
+        working-directory: brightship/services/api
+        run: npm test
+
+      - name: Run Jobs tests
+        working-directory: brightship/services/jobs
+        run: npm test
+
+      - name: Run Notify tests
+        working-directory: brightship/services/notify
+        run: npm test
+
+      # --------------------------------------------------------
+      # Dependency security
+      # --------------------------------------------------------
+      - name: Run npm audit - API
+        working-directory: brightship/services/api
+        run: npm audit --audit-level=high
+
+      - name: Run npm audit - Jobs
+        working-directory: brightship/services/jobs
+        run: npm audit --audit-level=high
+
+      - name: Run npm audit - Notify
+        working-directory: brightship/services/notify
+        run: npm audit --audit-level=high
+
+
+  # ============================================================
+  # 3. DOCKER BUILD + TRIVY SECURITY SCAN
+  # ============================================================
+  docker-security:
+    name: Docker Build & Trivy
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+      - ci-gate
+
+    if: github.event.pull_request.merged == true
+
+    steps:
+
+      - name: Checkout merged code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --------------------------------------------------------
+      # API
+      # --------------------------------------------------------
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship/services/api
+          file: ./brightship/services/api/Dockerfile
+          push: false
+          load: true
+          tags: brightship-api:${{ github.sha }}
+
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: brightship-api:${{ github.sha }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      # --------------------------------------------------------
+      # JOBS
+      # --------------------------------------------------------
+      - name: Build Jobs image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship/services/jobs
+          file: ./brightship/services/jobs/Dockerfile
+          push: false
+          load: true
+          tags: brightship-jobs:${{ github.sha }}
+
+      - name: Scan Jobs image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: brightship-jobs:${{ github.sha }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      # --------------------------------------------------------
+      # NOTIFY
+      # --------------------------------------------------------
+      - name: Build Notify image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship/services/notify
+          file: ./brightship/services/notify/Dockerfile
+          push: false
+          load: true
+          tags: brightship-notify:${{ github.sha }}
+
+      - name: Scan Notify image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: brightship-notify:${{ github.sha }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+
+  # ============================================================
+  # 4. PUBLISH IMAGES TO GHCR
+  # ============================================================
+  publish-images:
+    name: Publish Images to GHCR
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+      - ci-gate
+      - docker-security
+
+    if: github.event.pull_request.merged == true
+
+    steps:
+
+      - name: Checkout merged code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -71,9 +336,188 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --------------------------------------------------------
+      # API
+      # --------------------------------------------------------
+      - name: Build and push API
         uses: docker/build-push-action@v6
         with:
-          context: ./brightship
+          context: ./brightship/services/api
+          file: ./brightship/services/api/Dockerfile
           push: true
-          tags: ghcr.io/dreyshantel/brightship-tracker:${{ github.sha }}
+          tags: |
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ needs.branch-validation.outputs.squad }}-staging
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}
+
+      # --------------------------------------------------------
+      # JOBS
+      # --------------------------------------------------------
+      - name: Build and push Jobs
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship/services/jobs
+          file: ./brightship/services/jobs/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ needs.branch-validation.outputs.squad }}-staging
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}
+
+      # --------------------------------------------------------
+      # NOTIFY
+      # --------------------------------------------------------
+      - name: Build and push Notify
+        uses: docker/build-push-action@v6
+        with:
+          context: ./brightship/services/notify
+          file: ./brightship/services/notify/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ needs.branch-validation.outputs.squad }}-staging
+            ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ github.sha }}
+
+
+  # ============================================================
+  # 5. DEPLOY TO PORTAINER
+  # ============================================================
+  deploy-staging:
+    name: Deploy to Portainer
+    runs-on: ubuntu-latest
+
+    needs:
+      - branch-validation
+      - ci-gate
+      - docker-security
+      - publish-images
+
+    if: github.event.pull_request.merged == true
+
+    steps:
+
+      - name: Select Portainer stack
+        id: stack
+        env:
+          SQUAD: ${{ needs.branch-validation.outputs.squad }}
+        run: |
+          case "$SQUAD" in
+            alpha)
+              STACK_NAME="brightship-alpha"
+              COMPOSE_FILE="brightship/staging/alpha/docker-compose.yml"
+              ;;
+            beta)
+              STACK_NAME="brightship-beta"
+              COMPOSE_FILE="brightship/staging/beta/docker-compose.yml"
+              ;;
+            gamma)
+              STACK_NAME="brightship-gamma"
+              COMPOSE_FILE="brightship/staging/gamma/docker-compose.yml"
+              ;;
+            delta)
+              STACK_NAME="brightship-delta"
+              COMPOSE_FILE="brightship/staging/delta/docker-compose.yml"
+              ;;
+            *)
+              echo "::error::Unknown squad: $SQUAD"
+              exit 1
+              ;;
+          esac
+
+          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
+          echo "compose_file=$COMPOSE_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Get Portainer endpoint
+        id: endpoint
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+        run: |
+          ENDPOINT_ID=$(curl -sf \
+            "${PORTAINER_URL}/api/endpoints" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" |
+            jq -r '.[0].Id')
+
+          if [[ -z "$ENDPOINT_ID" || "$ENDPOINT_ID" == "null" ]]; then
+            echo "::error::Could not determine Portainer endpoint ID."
+            exit 1
+          fi
+
+          echo "endpoint_id=$ENDPOINT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Check Portainer stack
+        id: existing-stack
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          STACK_NAME: ${{ steps.stack.outputs.stack_name }}
+        run: |
+          STACK_ID=$(curl -sf \
+            "${PORTAINER_URL}/api/stacks" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" |
+            jq -r --arg STACK_NAME "$STACK_NAME" \
+            '.[] | select(.Name == $STACK_NAME) | .Id' |
+            head -n 1)
+
+          if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
+            echo "Stack exists: $STACK_NAME (ID: $STACK_ID)"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Stack does not exist: $STACK_NAME"
+          fi
+
+      - name: Create Portainer stack
+        if: steps.existing-stack.outputs.exists == 'false'
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
+          STACK_NAME: ${{ steps.stack.outputs.stack_name }}
+          COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          curl -sf -X POST \
+            "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data @- <<EOF
+          {
+            "Name": "${STACK_NAME}",
+            "RepositoryURL": "https://github.com/Dreyshantel/brightship-tracker.git",
+            "RepositoryReferenceName": "refs/heads/develop",
+            "ComposeFile": "${COMPOSE_FILE}",
+            "RepositoryAuthentication": false,
+            "Env": [
+              {
+                "name": "DB_PASSWORD",
+                "value": "${DB_PASSWORD}"
+              }
+            ]
+          }
+          EOF
+
+      - name: Redeploy Portainer stack
+        if: steps.existing-stack.outputs.exists == 'true'
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
+          STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
+        run: |
+          curl -sf -X PUT \
+            "${PORTAINER_URL}/api/stacks/${STACK_ID}/git/redeploy?endpointId=${ENDPOINT_ID}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data '{
+              "RepullImageAndRedeploy": true,
+              "Prune": false
+            }'
+
+      - name: Deployment summary
+        run: |
+          echo "Staging deployment successful"
+          echo "Squad: ${{ needs.branch-validation.outputs.squad }}"
+          echo "Stack: ${{ steps.stack.outputs.stack_name }}"
+          echo "Commit: ${{ github.event.pull_request.merge_commit_sha }}"
