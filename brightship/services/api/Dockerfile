@@ -1,25 +1,16 @@
-FROM node:22-alpine AS builder
-
-RUN apk update && apk upgrade libcrypto3 libssl3
+FROM node:20-alpine
 
 WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install -g npm@10.9.9 && npm ci
+RUN npm ci --omit=dev \
+    && rm -rf /usr/local/lib/node_modules/npm \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx \
+    && apk upgrade --no-cache
 
-COPY . .
-
-
-FROM node:22-alpine
-
-RUN apk update && apk upgrade libcrypto3 libssl3
-
-WORKDIR /app
-
-COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/src ./src
+COPY src ./src
 
 EXPOSE 3000
 
