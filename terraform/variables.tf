@@ -62,3 +62,18 @@ variable "rds_subnet_group_name" {
   description = "RDS subnet group name."
   type        = string
 }
+
+variable "k3s_ami_id" {
+  description = "AMI ID for the K3s production EC2."
+  type        = string
+}
+
+variable "k3s_instance_type" {
+  description = "Instance type for the K3s production EC2."
+  type        = string
+}
+
+variable "k3s_name" {
+  description = "Name tag for the K3s production EC2."
+  type        = string
+}

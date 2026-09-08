@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: brightship-production
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/Dreyshantel/brightship-tracker.git
+    targetRevision: main
+    path: k3s/brightship-api
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: brightship
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
