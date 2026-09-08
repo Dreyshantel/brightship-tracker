@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brightship-api
+  namespace: brightship
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: brightship-api
+  template:
+    metadata:
+      labels:
+        app: brightship-api
+    spec:
+      containers:
+        - name: brightship-api
+          image: ghcr.io/dreyshantel/brightship-api:a8b3e298ee8083b8cbd3d23c7c39790126876284
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: brightship-api-config
+            - secretRef:
+                name: brightship-api-secret
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
