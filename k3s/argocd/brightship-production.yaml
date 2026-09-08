@@ -9,7 +9,10 @@ spec:
   source:
     repoURL: https://github.com/Dreyshantel/brightship-tracker.git
     targetRevision: main
-    path: k3s/brightship-api
+    path: k3s
+    directory:
+      recurse: true
+      exclude: argocd/**
 
   destination:
     server: https://kubernetes.default.svc
