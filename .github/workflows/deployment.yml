@@ -1,0 +1,507 @@
+name: BrightShip Production Deployment
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: dreyshantel
+
+  AWS_REGION: us-east-1
+  EC2_INSTANCE_ID: i-0fdce62ef49bc9fa4
+  IAM_ROLE_ARN: arn:aws:iam::928118644342:role/BrightShip-GitHub-Production-Deploy
+
+  COMPOSE_PATH: /opt/brightship/compose-production.yml
+  SECRETS_ID: rds!db-97b7c300-82ae-4e9c-ae7d-9f81383cad2d
+
+jobs:
+
+  # ============================================================
+  # 1. VALIDATE MERGED PR
+  # ============================================================
+  validate:
+    name: Validate Production Deployment
+    runs-on: ubuntu-latest
+
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate branch
+        run: |
+          echo "Production deployment triggered by merged PR."
+          echo "Source branch: ${{ github.event.pull_request.head.ref }}"
+          echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Commit: ${{ github.sha }}"
+
+  # ============================================================
+  # 2. CI GATE
+  # ============================================================
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+
+    needs: validate
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: brightship_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d brightship_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    strategy:
+      fail-fast: true
+      matrix:
+        service:
+          - api
+          - jobs
+          - notify
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Gitleaks
+      # --------------------------------------------------------
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+
+      # --------------------------------------------------------
+      # Node.js
+      # --------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: brightship/services/${{ matrix.service }}/package-lock.json
+
+      # --------------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------------
+      - name: Install dependencies
+        working-directory: brightship/services/${{ matrix.service }}
+        run: npm ci
+
+      # --------------------------------------------------------
+      # Tests
+      # --------------------------------------------------------
+      - name: Run tests
+        working-directory: brightship/services/${{ matrix.service }}
+        env:
+          NODE_ENV: test
+
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: brightship_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_SSL: false
+
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: npm test
+
+      # --------------------------------------------------------
+      # Dependency audit
+      # --------------------------------------------------------
+      - name: Run npm audit
+        working-directory: brightship/services/${{ matrix.service }}
+        run: npm audit --audit-level=high
+
+  # ============================================================
+  # 3. DOCKER SECURITY
+  # ============================================================
+  docker-security:
+    name: Docker Security Scan
+    runs-on: ubuntu-latest
+
+    needs: ci-gate
+
+    strategy:
+      fail-fast: true
+      matrix:
+        service:
+          - api
+          - jobs
+          - notify
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        working-directory: brightship
+        run: |
+          docker build \
+            -t brightship-${{ matrix.service }}:${{ github.sha }} \
+            services/${{ matrix.service }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: brightship-${{ matrix.service }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+
+  # ============================================================
+  # 4. PUBLISH IMAGES TO GHCR
+  # ============================================================
+  publish-images:
+    name: Publish Production Images
+    runs-on: ubuntu-latest
+
+    needs: docker-security
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --------------------------------------------------------
+      # API
+      # --------------------------------------------------------
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: brightship/services/api
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-api:production
+
+      # --------------------------------------------------------
+      # Jobs
+      # --------------------------------------------------------
+      - name: Build and push Jobs
+        uses: docker/build-push-action@v6
+        with:
+          context: brightship/services/jobs
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-jobs:production
+
+      # --------------------------------------------------------
+      # Notify
+      # --------------------------------------------------------
+      - name: Build and push Notify
+        uses: docker/build-push-action@v6
+        with:
+          context: brightship/services/notify
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-notify:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/brightship-notify:production
+
+  # ============================================================
+  # 5. DEPLOY TO PRODUCTION
+  # ============================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    needs:
+      - validate
+      - publish-images
+
+    environment: production
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # AWS OIDC
+      # --------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # --------------------------------------------------------
+      # Encode production Compose file
+      # --------------------------------------------------------
+      - name: Encode production compose file
+        id: compose
+        run: |
+          COMPOSE_B64=$(base64 -w 0 brightship/compose-production.yml)
+          echo "compose_b64=$COMPOSE_B64" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------
+      # Deploy through SSM
+      # --------------------------------------------------------
+      - name: Deploy via AWS SSM
+        id: deploy
+        run: |
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "${{ env.AWS_REGION }}" \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "BrightShip production deployment ${{ github.sha }}" \
+            --parameters commands="[
+              \"set -e\",
+              \"mkdir -p /opt/brightship\",
+              \"echo '${{ steps.compose.outputs.compose_b64 }}' | base64 -d > '${{ env.COMPOSE_PATH }}'\",
+              \"cd /opt/brightship\",
+              \"export IMAGE_TAG='${{ github.sha }}'\",
+              \"SECRET_JSON=\\$(aws secretsmanager get-secret-value --secret-id '${{ env.SECRETS_ID }}' --query SecretString --output text)\",
+              \"export DB_HOST=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.host // .DB_HOST')\",
+              \"export DB_PORT=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.port // .DB_PORT // 5432')\",
+              \"export DB_NAME=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.dbname // .DB_NAME')\",
+              \"export DB_USER=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.username // .DB_USER')\",
+              \"export DB_PASSWORD=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.password // .DB_PASSWORD')\",
+              \"export DB_SSL=true\",
+              \"echo '${{ github.sha }}' > .current-deployment-tag\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' pull api jobs notify\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' up -d --remove-orphans api jobs notify\",
+              \"sleep 15\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' ps\",
+              \"curl --fail --silent --show-error http://localhost:3000/health\",
+              \"echo\",
+              \"echo 'Production deployment successful.'\",
+              \"cp .current-deployment-tag .last-known-good-tag\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "COMMAND_ID=$COMMAND_ID"
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------
+      # Wait for SSM
+      # --------------------------------------------------------
+      - name: Wait for deployment
+        continue-on-error: true
+        run: |
+          aws ssm wait command-executed \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.deploy.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}"
+
+      # --------------------------------------------------------
+      # Get actual SSM result
+      # --------------------------------------------------------
+      - name: Get deployment result
+        run: |
+
+          STATUS=$(aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.deploy.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "Status" \
+            --output text)
+
+          echo "Deployment status: $STATUS"
+
+          echo "===== STDOUT ====="
+
+          aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.deploy.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "StandardOutputContent" \
+            --output text
+
+          echo "===== STDERR ====="
+
+          aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.deploy.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "StandardErrorContent" \
+            --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Production deployment failed."
+            exit 1
+          fi
+
+  # ============================================================
+  # 6. ROLLBACK
+  # ============================================================
+  rollback-production:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+
+    needs: deploy-production
+
+    if: ${{ always() && needs.deploy-production.result == 'failure' }}
+
+    steps:
+
+      # --------------------------------------------------------
+      # AWS OIDC
+      # --------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # --------------------------------------------------------
+      # Rollback through SSM
+      # --------------------------------------------------------
+      - name: Rollback via AWS SSM
+        id: rollback
+        run: |
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "${{ env.AWS_REGION }}" \
+            --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "BrightShip production rollback" \
+            --parameters commands="[
+              \"set -e\",
+              \"cd /opt/brightship\",
+              \"if [ ! -f .last-known-good-tag ]; then echo 'No last-known-good deployment tag found. Automatic rollback unavailable.'; exit 0; fi\",
+              \"ROLLBACK_TAG=\\$(cat .last-known-good-tag)\",
+              \"echo Rolling back to \\$ROLLBACK_TAG\",
+              \"export IMAGE_TAG=\\$ROLLBACK_TAG\",
+              \"SECRET_JSON=\\$(aws secretsmanager get-secret-value --secret-id '${{ env.SECRETS_ID }}' --query SecretString --output text)\",
+              \"export DB_HOST=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.host // .DB_HOST')\",
+              \"export DB_PORT=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.port // .DB_PORT // 5432')\",
+              \"export DB_NAME=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.dbname // .DB_NAME')\",
+              \"export DB_USER=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.username // .DB_USER')\",
+              \"export DB_PASSWORD=\\$(echo \\\"\\$SECRET_JSON\\\" | jq -r '.password // .DB_PASSWORD')\",
+              \"export DB_SSL=true\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' pull api jobs notify\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' up -d --remove-orphans api jobs notify\",
+              \"sleep 15\",
+              \"docker compose -f '${{ env.COMPOSE_PATH }}' ps\",
+              \"curl --fail --silent --show-error http://localhost:3000/health\",
+              \"echo\",
+              \"echo 'Rollback completed successfully.'\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "COMMAND_ID=$COMMAND_ID"
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------
+      # Wait for rollback
+      # --------------------------------------------------------
+      - name: Wait for rollback
+        continue-on-error: true
+        run: |
+          aws ssm wait command-executed \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.rollback.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}"
+
+      # --------------------------------------------------------
+      # Get rollback result
+      # --------------------------------------------------------
+      - name: Get rollback result
+        run: |
+
+          STATUS=$(aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.rollback.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "Status" \
+            --output text)
+
+          echo "Rollback status: $STATUS"
+
+          echo "===== STDOUT ====="
+
+          aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.rollback.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "StandardOutputContent" \
+            --output text
+
+          echo "===== STDERR ====="
+
+          aws ssm get-command-invocation \
+            --region "${{ env.AWS_REGION }}" \
+            --command-id "${{ steps.rollback.outputs.command_id }}" \
+            --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+            --query "StandardErrorContent" \
+            --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Rollback failed."
+            exit 1
+          fi
+
+  # ============================================================
+  # 7. SUMMARY
+  # ============================================================
+  summary:
+    name: Production Deployment Summary
+    runs-on: ubuntu-latest
+
+    needs:
+      - validate
+      - ci-gate
+      - docker-security
+      - publish-images
+      - deploy-production
+      - rollback-production
+
+    if: always()
+
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "=========================================="
+          echo " BrightShip Production Deployment"
+          echo "=========================================="
+          echo "Commit: ${{ github.sha }}"
+          echo "API:    ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}"
+          echo "Jobs:   ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}"
+          echo "Notify: ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ github.sha }}"
+          echo "=========================================="
+          echo "Validate:        ${{ needs.validate.result }}"
+          echo "CI Gate:         ${{ needs.ci-gate.result }}"
+          echo "Security:        ${{ needs.docker-security.result }}"
+          echo "Publish:         ${{ needs.publish-images.result }}"
+          echo "Deployment:      ${{ needs.deploy-production.result }}"
+          echo "Rollback:        ${{ needs.rollback-production.result }}"
+          echo "=========================================="
