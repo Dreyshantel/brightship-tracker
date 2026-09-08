@@ -1,0 +1,72 @@
+services:
+
+  api:
+    image: ghcr.io/dreyshantel/brightship-api:alpha-staging
+    ports:
+      - "3011:3000"
+    environment:
+      NODE_ENV: staging
+      PORT: 3000
+
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: brightship_alpha
+      DB_USER: admin
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_SSL: "false"
+
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+
+  jobs:
+    image: ghcr.io/dreyshantel/brightship-jobs:alpha-staging
+    environment:
+      NODE_ENV: staging
+
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+
+  notify:
+    image: ghcr.io/dreyshantel/brightship-notify:alpha-staging
+    environment:
+      NODE_ENV: staging
+
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: brightship_alpha
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+
+    volumes:
+      - alpha_pgdata:/var/lib/postgresql/data
+
+    restart: unless-stopped
+
+
+volumes:
+  alpha_pgdata:

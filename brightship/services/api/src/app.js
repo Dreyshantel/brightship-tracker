@@ -1,8 +1,9 @@
 const express = require('express');
 const { Pool } = require('pg');
+const { createClient } = require('redis');
+const { Queue } = require('bullmq');
 
 const app = express();
-
 app.use(express.json());
 
 // ─── DATABASE ─────────────────────────────────────────────────────────────────
@@ -19,14 +20,125 @@ const pool = new Pool({
   : false,
 });
 
+// ─── REDIS ────────────────────────────────────────────────────────────────────
+
+const redisClient = createClient({
+  socket: {
+    host: process.env.REDIS_HOST,
+    port: process.env.REDIS_PORT,
+  },
+});
+
+redisClient.on('error', (err) => {
+  console.error('Redis error:', err.message);
+});
+
+const queue = new Queue('shipment-processing', {
+  connection: {
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT),
+  },
+});
+
+const notificationQueue = new Queue('shipment-notifications', {
+  connection: {
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT),
+  },
+});
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+app.get('/health', async (req, res) => {
+  let database = 'ok';
+  let redis = 'ok';
+
+  try {
+    await pool.query('SELECT 1');
+  } catch (err) {
+    database = 'failed';
+    console.error('Database health check failed:', err.message);
+  }
+
+  try {
+    await redisClient.ping();
+  } catch (err) {
+    redis = 'failed';
+    console.error('Redis health check failed:', err.message);
+  }
+
+  const healthy = database === 'ok' && redis === 'ok';
+
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'unhealthy',
+    database,
+    redis,
     version: process.env.APP_VERSION || '1.0.0',
   });
 });
+
+
+// ─── AGGREGATE HEALTH ─────────────────────────────────────────────────────────
+
+const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) || 3000;
+
+async function checkServiceHealth(name, url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const body = await response.json().catch(() => ({}));
+
+    if (response.ok && body.status === 'ok') {
+      return { name, status: 'ok' };
+    }
+
+    return {
+      name,
+      status: 'failed',
+      error: `Responded with status "${body.status || response.status}"`,
+    };
+  } catch (err) {
+    return {
+      name,
+      status: 'failed',
+      error: err.name === 'AbortError' ? 'Timed out' : err.message,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+app.get('/health/all', async (req, res) => {
+  const targets = [
+    { name: 'api', url: 'http://api:3000/health' },
+    { name: 'jobs', url: 'http://jobs:3001/health' },
+    { name: 'notify', url: 'http://notify:3002/health' },
+  ];
+
+  const results = await Promise.all(
+    targets.map((t) => checkServiceHealth(t.name, t.url))
+  );
+
+  const services = {};
+  let allHealthy = true;
+
+  for (const result of results) {
+    if (result.status !== 'ok') {
+      allHealthy = false;
+      services[result.name] = { status: result.status, error: result.error };
+    } else {
+      services[result.name] = { status: result.status };
+    }
+  }
+
+  res.status(allHealthy ? 200 : 503).json({
+    status: allHealthy ? 'ok' : 'unhealthy',
+    services,
+  });
+});
+
 
 // ─── LIST SHIPMENTS ───────────────────────────────────────────────────────────
 
@@ -89,7 +201,14 @@ app.post('/shipments', async (req, res) => {
       [sender, recipient, origin, destination, weight_kg || null]
     );
 
-    res.status(201).json({ shipment: result.rows[0] });
+    const shipment = result.rows[0];
+
+    await queue.add('process-shipment', {
+      shipmentId: shipment.id,
+      status: shipment.status,
+    });
+
+    res.status(201).json({ shipment });
   } catch (err) {
     console.error('DB error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
@@ -128,11 +247,32 @@ app.patch('/shipments/:id/status', async (req, res) => {
       return res.status(404).json({ error: 'Shipment not found' });
     }
 
-    res.json({ shipment: result.rows[0] });
+    const shipment = result.rows[0];
+
+    await notificationQueue.add(
+      'shipment-status-notification',
+      {
+        shipmentId: shipment.id,
+        recipient: 'test@example.com',
+        channel: 'email',
+        message: `Your shipment is now ${shipment.status}.`,
+      },
+      {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      }
+    );
+
+    res.json({ shipment });
   } catch (err) {
     console.error('DB error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-module.exports = app;
+module.exports = { app, redisClient };
+
+
