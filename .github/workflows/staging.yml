@@ -39,29 +39,23 @@ jobs:
           echo "Pull Request merged: $PR_MERGED"
           echo "Source branch: $PR_HEAD_REF"
           echo "Target branch: ${{ github.event.pull_request.base.ref }}"
-
           if [[ "$PR_MERGED" != "true" ]]; then
             echo "Pull request was closed without being merged."
             echo "No deployment will occur."
             exit 0
           fi
-
           if [[ "$PR_HEAD_REF" == squad-alpha/* ]]; then
             SQUAD="alpha"
             STACK="brightship-alpha"
-
           elif [[ "$PR_HEAD_REF" == squad-beta/* ]]; then
             SQUAD="beta"
             STACK="brightship-beta"
-
           elif [[ "$PR_HEAD_REF" == squad-gamma/* ]]; then
             SQUAD="gamma"
             STACK="brightship-gamma"
-
           elif [[ "$PR_HEAD_REF" == squad-delta/* ]]; then
             SQUAD="delta"
             STACK="brightship-delta"
-
           else
             echo "::error::Merged PR must originate from a valid squad branch."
             echo "::error::Expected:"
@@ -71,14 +65,10 @@ jobs:
             echo "::error::squad-delta/*"
             exit 1
           fi
-
           echo "Detected squad: $SQUAD"
           echo "Target Portainer stack: $STACK"
-
           echo "squad=$SQUAD" >> "$GITHUB_OUTPUT"
           echo "stack=$STACK" >> "$GITHUB_OUTPUT"
-
-
   # ============================================================
   # 2. CI GATE
   # ============================================================
@@ -108,7 +98,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
       redis:
         image: redis:7-alpine
         ports:
@@ -119,7 +108,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     env:
       NODE_ENV: test
 
@@ -150,7 +138,6 @@ jobs:
             brightship/services/api/package-lock.json
             brightship/services/jobs/package-lock.json
             brightship/services/notify/package-lock.json
-
       # --------------------------------------------------------
       # Secret scanning
       # --------------------------------------------------------
@@ -187,7 +174,6 @@ jobs:
             -U "$DB_USER" \
             -d "$DB_NAME" \
             -f brightship/database/schema.sql
-
       # --------------------------------------------------------
       # Application tests
       # --------------------------------------------------------
@@ -351,7 +337,6 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}
-
       # --------------------------------------------------------
       # JOBS
       # --------------------------------------------------------
@@ -364,7 +349,6 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}
-
       # --------------------------------------------------------
       # NOTIFY
       # --------------------------------------------------------
@@ -377,8 +361,6 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ github.sha }}
-
-
   # ============================================================
   # 5. DEPLOY TO PORTAINER
   # ============================================================
@@ -423,10 +405,8 @@ jobs:
               exit 1
               ;;
           esac
-
           echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
           echo "compose_file=$COMPOSE_FILE" >> "$GITHUB_OUTPUT"
-
       - name: Get Portainer endpoint
         id: endpoint
         env:
@@ -437,14 +417,11 @@ jobs:
             "${PORTAINER_URL}/api/endpoints" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" |
             jq -r '.[0].Id')
-
           if [[ -z "$ENDPOINT_ID" || "$ENDPOINT_ID" == "null" ]]; then
             echo "::error::Could not determine Portainer endpoint ID."
             exit 1
           fi
-
           echo "endpoint_id=$ENDPOINT_ID" >> "$GITHUB_OUTPUT"
-
       - name: Check Portainer stack
         id: existing-stack
         env:
@@ -458,7 +435,6 @@ jobs:
             jq -r --arg STACK_NAME "$STACK_NAME" \
             '.[] | select(.Name == $STACK_NAME) | .Id' |
             head -n 1)
-
           if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
@@ -467,7 +443,6 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Stack does not exist: $STACK_NAME"
           fi
-
       - name: Create Portainer stack
         if: steps.existing-stack.outputs.exists == 'false'
         env:
@@ -497,7 +472,6 @@ jobs:
             ]
           }
           EOF
-
       - name: Redeploy Portainer stack
         if: steps.existing-stack.outputs.exists == 'true'
         env:
@@ -514,7 +488,6 @@ jobs:
               "RepullImageAndRedeploy": true,
               "Prune": false
             }'
-
       - name: Deployment summary
         run: |
           echo "Staging deployment successful"
