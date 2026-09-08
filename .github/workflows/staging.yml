@@ -39,23 +39,29 @@ jobs:
           echo "Pull Request merged: $PR_MERGED"
           echo "Source branch: $PR_HEAD_REF"
           echo "Target branch: ${{ github.event.pull_request.base.ref }}"
+
           if [[ "$PR_MERGED" != "true" ]]; then
             echo "Pull request was closed without being merged."
             echo "No deployment will occur."
             exit 0
           fi
+
           if [[ "$PR_HEAD_REF" == squad-alpha/* ]]; then
             SQUAD="alpha"
             STACK="brightship-alpha"
+
           elif [[ "$PR_HEAD_REF" == squad-beta/* ]]; then
             SQUAD="beta"
             STACK="brightship-beta"
+
           elif [[ "$PR_HEAD_REF" == squad-gamma/* ]]; then
             SQUAD="gamma"
             STACK="brightship-gamma"
+
           elif [[ "$PR_HEAD_REF" == squad-delta/* ]]; then
             SQUAD="delta"
             STACK="brightship-delta"
+
           else
             echo "::error::Merged PR must originate from a valid squad branch."
             echo "::error::Expected:"
@@ -65,10 +71,14 @@ jobs:
             echo "::error::squad-delta/*"
             exit 1
           fi
+
           echo "Detected squad: $SQUAD"
           echo "Target Portainer stack: $STACK"
+
           echo "squad=$SQUAD" >> "$GITHUB_OUTPUT"
           echo "stack=$STACK" >> "$GITHUB_OUTPUT"
+
+
   # ============================================================
   # 2. CI GATE
   # ============================================================
@@ -82,47 +92,42 @@ jobs:
     if: github.event.pull_request.merged == true
 
     services:
-
       postgres:
         image: postgres:15-alpine
         ports:
           - 5432:5432
-
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: testpassword
           POSTGRES_DB: brightship_test
-
         options: >-
           --health-cmd "pg_isready -U admin -d brightship_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
       redis:
         image: redis:7-alpine
         ports:
           - 6379:6379
-
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
     env:
       NODE_ENV: test
-
       DB_HOST: localhost
       DB_PORT: 5432
       DB_NAME: brightship_test
       DB_USER: admin
       DB_PASSWORD: testpassword
       DB_SSL: false
-
       REDIS_HOST: localhost
       REDIS_PORT: 6379
 
     steps:
-
       - name: Checkout merged code
         uses: actions/checkout@v6
         with:
@@ -138,17 +143,12 @@ jobs:
             brightship/services/api/package-lock.json
             brightship/services/jobs/package-lock.json
             brightship/services/notify/package-lock.json
-      # --------------------------------------------------------
-      # Secret scanning
-      # --------------------------------------------------------
+
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --------------------------------------------------------
-      # Install dependencies
-      # --------------------------------------------------------
       - name: Install API dependencies
         working-directory: brightship/services/api
         run: npm ci
@@ -161,9 +161,6 @@ jobs:
         working-directory: brightship/services/notify
         run: npm ci
 
-      # --------------------------------------------------------
-      # Initialize test database
-      # --------------------------------------------------------
       - name: Initialize test database
         env:
           PGPASSWORD: ${{ env.DB_PASSWORD }}
@@ -174,9 +171,7 @@ jobs:
             -U "$DB_USER" \
             -d "$DB_NAME" \
             -f brightship/database/schema.sql
-      # --------------------------------------------------------
-      # Application tests
-      # --------------------------------------------------------
+
       - name: Run API tests
         working-directory: brightship/services/api
         run: npm test
@@ -189,9 +184,6 @@ jobs:
         working-directory: brightship/services/notify
         run: npm test
 
-      # --------------------------------------------------------
-      # Dependency security
-      # --------------------------------------------------------
       - name: Run npm audit - API
         working-directory: brightship/services/api
         run: npm audit --audit-level=high
@@ -206,7 +198,7 @@ jobs:
 
 
   # ============================================================
-  # 3. DOCKER BUILD + TRIVY SECURITY SCAN
+  # 3. DOCKER SECURITY
   # ============================================================
   docker-security:
     name: Docker Build & Trivy
@@ -219,7 +211,6 @@ jobs:
     if: github.event.pull_request.merged == true
 
     steps:
-
       - name: Checkout merged code
         uses: actions/checkout@v6
         with:
@@ -229,9 +220,6 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # --------------------------------------------------------
-      # API
-      # --------------------------------------------------------
       - name: Build API image
         uses: docker/build-push-action@v6
         with:
@@ -250,9 +238,6 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
-      # --------------------------------------------------------
-      # JOBS
-      # --------------------------------------------------------
       - name: Build Jobs image
         uses: docker/build-push-action@v6
         with:
@@ -271,9 +256,6 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
 
-      # --------------------------------------------------------
-      # NOTIFY
-      # --------------------------------------------------------
       - name: Build Notify image
         uses: docker/build-push-action@v6
         with:
@@ -294,7 +276,7 @@ jobs:
 
 
   # ============================================================
-  # 4. PUBLISH IMAGES TO GHCR
+  # 4. PUBLISH IMAGES
   # ============================================================
   publish-images:
     name: Publish Images to GHCR
@@ -308,7 +290,6 @@ jobs:
     if: github.event.pull_request.merged == true
 
     steps:
-
       - name: Checkout merged code
         uses: actions/checkout@v6
         with:
@@ -325,9 +306,6 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # --------------------------------------------------------
-      # API
-      # --------------------------------------------------------
       - name: Build and push API
         uses: docker/build-push-action@v6
         with:
@@ -337,9 +315,7 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ github.sha }}
-      # --------------------------------------------------------
-      # JOBS
-      # --------------------------------------------------------
+
       - name: Build and push Jobs
         uses: docker/build-push-action@v6
         with:
@@ -349,9 +325,7 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ github.sha }}
-      # --------------------------------------------------------
-      # NOTIFY
-      # --------------------------------------------------------
+
       - name: Build and push Notify
         uses: docker/build-push-action@v6
         with:
@@ -361,6 +335,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ needs.branch-validation.outputs.squad }}-staging
             ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ github.sha }}
+
+
   # ============================================================
   # 5. DEPLOY TO PORTAINER
   # ============================================================
@@ -378,6 +354,9 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------------
+      # Select stack
+      # --------------------------------------------------------
       - name: Select Portainer stack
         id: stack
         env:
@@ -405,8 +384,14 @@ jobs:
               exit 1
               ;;
           esac
+
           echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
           echo "compose_file=$COMPOSE_FILE" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Get Portainer endpoint
+      # --------------------------------------------------------
       - name: Get Portainer endpoint
         id: endpoint
         env:
@@ -417,11 +402,18 @@ jobs:
             "${PORTAINER_URL}/api/endpoints" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" |
             jq -r '.[0].Id')
+
           if [[ -z "$ENDPOINT_ID" || "$ENDPOINT_ID" == "null" ]]; then
             echo "::error::Could not determine Portainer endpoint ID."
             exit 1
           fi
+
           echo "endpoint_id=$ENDPOINT_ID" >> "$GITHUB_OUTPUT"
+
+
+      # --------------------------------------------------------
+      # Check whether stack already exists
+      # --------------------------------------------------------
       - name: Check Portainer stack
         id: existing-stack
         env:
@@ -435,6 +427,7 @@ jobs:
             jq -r --arg STACK_NAME "$STACK_NAME" \
             '.[] | select(.Name == $STACK_NAME) | .Id' |
             head -n 1)
+
           if [[ -n "$STACK_ID" && "$STACK_ID" != "null" ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "stack_id=$STACK_ID" >> "$GITHUB_OUTPUT"
@@ -443,6 +436,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Stack does not exist: $STACK_NAME"
           fi
+
+
+      # --------------------------------------------------------
+      # Create stack for first deployment
+      # --------------------------------------------------------
       - name: Create Portainer stack
         if: steps.existing-stack.outputs.exists == 'false'
         env:
@@ -472,6 +470,11 @@ jobs:
             ]
           }
           EOF
+
+
+      # --------------------------------------------------------
+      # Redeploy existing Git stack
+      # --------------------------------------------------------
       - name: Redeploy Portainer stack
         if: steps.existing-stack.outputs.exists == 'true'
         env:
@@ -480,17 +483,48 @@ jobs:
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
           STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
         run: |
-          curl -sf -X PUT \
+          echo "Redeploying Portainer stack..."
+          echo "Stack ID: $STACK_ID"
+          echo "Endpoint ID: $ENDPOINT_ID"
+
+          RESPONSE=$(curl -sS \
+            -w "\nHTTP_STATUS:%{http_code}" \
+            -X PUT \
             "${PORTAINER_URL}/api/stacks/${STACK_ID}/git/redeploy?endpointId=${ENDPOINT_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
             --data '{
+              "RepositoryReferenceName": "refs/heads/develop",
+              "RepositoryAuthentication": false,
               "RepullImageAndRedeploy": true,
               "Prune": false
-            }'
+            }')
+
+          echo "$RESPONSE"
+
+          HTTP_STATUS=$(echo "$RESPONSE" | sed -n 's/HTTP_STATUS://p')
+
+          if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
+            echo "::error::Portainer redeploy failed with HTTP status $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "Portainer stack redeployed successfully."
+
+
+      # --------------------------------------------------------
+      # Deployment summary
+      # --------------------------------------------------------
       - name: Deployment summary
         run: |
-          echo "Staging deployment successful"
-          echo "Squad: ${{ needs.branch-validation.outputs.squad }}"
-          echo "Stack: ${{ steps.stack.outputs.stack_name }}"
-          echo "Commit: ${{ github.event.pull_request.merge_commit_sha }}"
+          echo "=========================================="
+          echo " BrightShip Staging Deployment"
+          echo "=========================================="
+          echo "Squad:   ${{ needs.branch-validation.outputs.squad }}"
+          echo "Stack:   ${{ steps.stack.outputs.stack_name }}"
+          echo "Commit:  ${{ github.event.pull_request.merge_commit_sha }}"
+          echo "API:     ghcr.io/${{ env.IMAGE_OWNER }}/brightship-api:${{ needs.branch-validation.outputs.squad }}-staging"
+          echo "Jobs:    ghcr.io/${{ env.IMAGE_OWNER }}/brightship-jobs:${{ needs.branch-validation.outputs.squad }}-staging"
+          echo "Notify:  ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ needs.branch-validation.outputs.squad }}-staging"
+          echo "=========================================="
+          echo "Staging deployment successful."
