@@ -1,4 +1,3 @@
-```yaml
 name: BrightShip Production Deployment
 
 on:
@@ -454,5 +453,5 @@ jobs:
           echo "Rollback:    ${{ needs.rollback-production.result }}"
 
           echo "=========================================="
-```
+
 
