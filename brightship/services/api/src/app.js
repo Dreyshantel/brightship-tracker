@@ -78,6 +78,68 @@ app.get('/health', async (req, res) => {
 });
 
 
+// ─── AGGREGATE HEALTH ─────────────────────────────────────────────────────────
+
+const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) || 3000;
+
+async function checkServiceHealth(name, url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const body = await response.json().catch(() => ({}));
+
+    if (response.ok && body.status === 'ok') {
+      return { name, status: 'ok' };
+    }
+
+    return {
+      name,
+      status: 'failed',
+      error: `Responded with status "${body.status || response.status}"`,
+    };
+  } catch (err) {
+    return {
+      name,
+      status: 'failed',
+      error: err.name === 'AbortError' ? 'Timed out' : err.message,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+app.get('/health/all', async (req, res) => {
+  const targets = [
+    { name: 'api', url: 'http://api:3000/health' },
+    { name: 'jobs', url: 'http://jobs:3001/health' },
+    { name: 'notify', url: 'http://notify:3002/health' },
+  ];
+
+  const results = await Promise.all(
+    targets.map((t) => checkServiceHealth(t.name, t.url))
+  );
+
+  const services = {};
+  let allHealthy = true;
+
+  for (const result of results) {
+    if (result.status !== 'ok') {
+      allHealthy = false;
+      services[result.name] = { status: result.status, error: result.error };
+    } else {
+      services[result.name] = { status: result.status };
+    }
+  }
+
+  res.status(allHealthy ? 200 : 503).json({
+    status: allHealthy ? 'ok' : 'unhealthy',
+    services,
+  });
+});
+
+
 // ─── LIST SHIPMENTS ───────────────────────────────────────────────────────────
 
 app.get('/shipments', async (req, res) => {
