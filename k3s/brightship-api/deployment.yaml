@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: brightship-api
-          image: ghcr.io/dreyshantel/brightship-tracker:693762427bba385b1e5d769722bf146e8e67eb49
+          image: ghcr.io/dreyshantel/brightship-api:a8b3e298ee8083b8cbd3d23c7c39790126876284
           ports:
             - containerPort: 3000
           envFrom:
