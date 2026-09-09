@@ -449,7 +449,7 @@ jobs:
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
           COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
-          DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           curl -sf -X POST \
             "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
@@ -522,7 +522,7 @@ jobs:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
-          STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
+        STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
         run: |
           echo "Redeploying Portainer stack..."
           echo "Stack ID: $STACK_ID"
