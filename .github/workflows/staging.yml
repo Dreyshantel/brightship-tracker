@@ -412,7 +412,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # Check whether stack already exists
+      # Check existing stack
       # --------------------------------------------------------
       - name: Check Portainer stack
         id: existing-stack
@@ -439,7 +439,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # Create stack for first deployment
+      # Create stack
       # --------------------------------------------------------
       - name: Create Portainer stack
         if: steps.existing-stack.outputs.exists == 'false'
@@ -451,6 +451,8 @@ jobs:
           COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
+          echo "::add-mask::$DB_PASSWORD"
+
           curl -sf -X POST \
             "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
@@ -471,9 +473,11 @@ jobs:
           }
           EOF
 
+          echo "Portainer stack created successfully."
+
 
       # --------------------------------------------------------
-      # Update password for existing stack
+      # Update existing stack environment
       # --------------------------------------------------------
       - name: Update Portainer stack environment
         if: steps.existing-stack.outputs.exists == 'true'
@@ -490,31 +494,35 @@ jobs:
             "${PORTAINER_URL}/api/stacks/${STACK_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}")
 
-          ENV_JSON=$(echo "$STACK_ENV" | jq \
-            --arg password "$DB_PASSWORD" \
-            '.Env | map(if .name == "DB_PASSWORD" then .value = $password else . end)')
+          ENV_JSON=$(echo "$STACK_ENV" | jq -c '.Env // []')
 
-          if [[ "$(echo "$ENV_JSON" | jq 'any(.[]; .name == "DB_PASSWORD")')" != "true" ]]; then
-            ENV_JSON=$(echo "$ENV_JSON" | jq \
-              --arg password "$DB_PASSWORD" \
-              '. + [{"name":"DB_PASSWORD","value":$password}]')
-          fi
+          ENV_JSON=$(echo "$ENV_JSON" | jq \
+            --arg password "$DB_PASSWORD" \
+            'if any(.[]; .name == "DB_PASSWORD")
+             then map(if .name == "DB_PASSWORD"
+                 then .value = $password
+                 else .
+                 end)
+             else . + [{"name":"DB_PASSWORD","value":$password}]
+             end')
 
           jq -n \
             --argjson env "$ENV_JSON" \
-            '{Env: $env}' > /tmp/stack-env.json
+            '{
+              Env: $env
+            }' > /tmp/stack-env.json
 
           curl -sf -X PUT \
-            "${PORTAINER_URL}/api/stacks/${STACK_ID}" \
+            "${PORTAINER_URL}/api/stacks/${STACK_ID}?endpointId=${ENDPOINT_ID}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
             --data @/tmp/stack-env.json
 
-          echo "Portainer stack environment updated."
+          echo "Portainer stack environment updated successfully."
 
 
       # --------------------------------------------------------
-      # Redeploy existing Git stack
+      # Redeploy existing stack
       # --------------------------------------------------------
       - name: Redeploy Portainer stack
         if: steps.existing-stack.outputs.exists == 'true'
