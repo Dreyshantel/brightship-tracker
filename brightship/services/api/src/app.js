@@ -81,6 +81,18 @@ app.get('/health', async (req, res) => {
 // ─── AGGREGATE HEALTH ─────────────────────────────────────────────────────────
 
 const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) || 3000;
+const HEALTH_CACHE_TTL_MS = Number(process.env.HEALTH_CACHE_TTL_MS) || 3000;
+
+let healthCache = null; // { expiresAt, payload, statusCode }
+
+// Maps internal error details to a safe, generic reason for the response body.
+// Full error is logged server-side; only the category is exposed externally.
+function classifyError(err) {
+  if (err.name === 'AbortError') return 'timeout';
+  if (err.code === 'ECONNREFUSED') return 'unreachable';
+  if (err.code === 'ENOTFOUND') return 'unreachable';
+  return 'unreachable';
+}
 
 async function checkServiceHealth(name, url) {
   const controller = new AbortController();
@@ -94,16 +106,20 @@ async function checkServiceHealth(name, url) {
       return { name, status: 'ok' };
     }
 
+    console.error(`Health check failed for "${name}": responded with status "${body.status || response.status}"`);
+
     return {
       name,
       status: 'failed',
-      error: `Responded with status "${body.status || response.status}"`,
+      error: 'unhealthy',
     };
   } catch (err) {
+    console.error(`Health check failed for "${name}":`, err.message);
+
     return {
       name,
       status: 'failed',
-      error: err.name === 'AbortError' ? 'Timed out' : err.message,
+      error: classifyError(err),
     };
   } finally {
     clearTimeout(timeout);
@@ -111,6 +127,12 @@ async function checkServiceHealth(name, url) {
 }
 
 app.get('/health/all', async (req, res) => {
+  const now = Date.now();
+
+  if (healthCache && healthCache.expiresAt > now) {
+    return res.status(healthCache.statusCode).json(healthCache.payload);
+  }
+
   const targets = [
     { name: 'api', url: 'http://api:3000/health' },
     { name: 'jobs', url: 'http://jobs:3001/health' },
@@ -133,10 +155,19 @@ app.get('/health/all', async (req, res) => {
     }
   }
 
-  res.status(allHealthy ? 200 : 503).json({
+  const statusCode = allHealthy ? 200 : 503;
+  const payload = {
     status: allHealthy ? 'ok' : 'unhealthy',
     services,
-  });
+  };
+
+  healthCache = {
+    expiresAt: now + HEALTH_CACHE_TTL_MS,
+    payload,
+    statusCode,
+  };
+
+  res.status(statusCode).json(payload);
 });
 
 
