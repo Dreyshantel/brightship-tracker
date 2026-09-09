@@ -64,4 +64,4 @@ See `.env` — credentials are in there.
 - Disk fills up if you don't clear Docker logs manually
 - The /shipments endpoint gets slow above 500 records
 
-If something is broken, read docs/incident-log.txt first.
+If something is broken, read docs/incident-log.txt first..
