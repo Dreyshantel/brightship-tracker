@@ -19,10 +19,7 @@ const worker = new Worker(
     console.log('Job ID:', job.id);
     console.log('Job data:', job.data);
     console.log('=================================');
-
-    // Business logic will go here later.
-    // For now, we are only testing the queue/worker connection.
-
+  
     return {
       success: true,
       jobId: job.id,
