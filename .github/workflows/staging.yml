@@ -449,7 +449,7 @@ jobs:
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
           STACK_NAME: ${{ steps.stack.outputs.stack_name }}
           COMPOSE_FILE: ${{ steps.stack.outputs.compose_file }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
         run: |
           curl -sf -X POST \
             "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
@@ -470,6 +470,47 @@ jobs:
             ]
           }
           EOF
+
+
+      # --------------------------------------------------------
+      # Update password for existing stack
+      # --------------------------------------------------------
+      - name: Update Portainer stack environment
+        if: steps.existing-stack.outputs.exists == 'true'
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
+          STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$DB_PASSWORD"
+
+          STACK_ENV=$(curl -sf \
+            "${PORTAINER_URL}/api/stacks/${STACK_ID}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}")
+
+          ENV_JSON=$(echo "$STACK_ENV" | jq \
+            --arg password "$DB_PASSWORD" \
+            '.Env | map(if .name == "DB_PASSWORD" then .value = $password else . end)')
+
+          if [[ "$(echo "$ENV_JSON" | jq 'any(.[]; .name == "DB_PASSWORD")')" != "true" ]]; then
+            ENV_JSON=$(echo "$ENV_JSON" | jq \
+              --arg password "$DB_PASSWORD" \
+              '. + [{"name":"DB_PASSWORD","value":$password}]')
+          fi
+
+          jq -n \
+            --argjson env "$ENV_JSON" \
+            '{Env: $env}' > /tmp/stack-env.json
+
+          curl -sf -X PUT \
+            "${PORTAINER_URL}/api/stacks/${STACK_ID}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data @/tmp/stack-env.json
+
+          echo "Portainer stack environment updated."
 
 
       # --------------------------------------------------------
@@ -528,3 +569,4 @@ jobs:
           echo "Notify:  ghcr.io/${{ env.IMAGE_OWNER }}/brightship-notify:${{ needs.branch-validation.outputs.squad }}-staging"
           echo "=========================================="
           echo "Staging deployment successful."
+
