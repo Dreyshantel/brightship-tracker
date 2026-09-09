@@ -522,7 +522,7 @@ jobs:
           PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           ENDPOINT_ID: ${{ steps.endpoint.outputs.endpoint_id }}
-        STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
+          STACK_ID: ${{ steps.existing-stack.outputs.stack_id }}
         run: |
           echo "Redeploying Portainer stack..."
           echo "Stack ID: $STACK_ID"
